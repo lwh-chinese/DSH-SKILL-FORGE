@@ -1,5 +1,5 @@
 
-# DSH Skill Manager
+# # DSH Skill Forge
 
 A DSH plugin that adds a left-sidebar panel for managing installed skills, plus a `make-skill` agent preset and GitHub skill search.
 
