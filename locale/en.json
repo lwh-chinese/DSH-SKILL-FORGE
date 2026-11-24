@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "title": "Skill manager",
+    "description": "Manage installed DSH skills from the left sidebar: list, view, enable/disable, create and delete; compatible with current and older DSH Web versions.",
+    "detail": "docs/DETAIL.md"
+  },
+  "entry": {
+    "label": "Skills"
+  }
+}

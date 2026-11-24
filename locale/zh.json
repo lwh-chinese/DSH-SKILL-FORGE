@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "title": "技能管理器",
+    "description": "在左侧栏管理已安装的 DSH skill：列出、查看正文、启用/停用、新建与删除；兼容当前及较旧的 DSH Web 版本。",
+    "detail": "docs/DETAIL.md"
+  },
+  "entry": {
+    "label": "技能"
+  }
+}

@@ -1,0 +1,9 @@
+# 投稿文件：复制到 awesome-dsh-plugin 仓库的 data/plugins/ 目录，
+# 文件名改为 <你的owner>__DSH-SKILL-FORGE.yml
+# 把下面的 OWNER 替换成你的 GitHub 用户名（大小写按你的账号）。
+url: https://github.com/OWNER/DSH-SKILL-FORGE
+name: OWNER/DSH-SKILL-FORGE
+category: skill
+description:
+  en: 'Adds a left-sidebar panel to list, view, hide, create and delete installed skills, a make-skill agent preset, and GitHub skill search.'
+  zh: '提供左侧栏面板，用于列出、查看、隐藏、新建和删除已安装的 skill，并附带制作 skill 预设与 GitHub skill 搜索。'
