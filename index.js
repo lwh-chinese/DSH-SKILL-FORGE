@@ -490,6 +490,27 @@ export function apply(ctx, config = {}) {
   // configured the enhancement API returns ok:false and the client falls back.
   const llmSvc = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
 
+  // Global prompt guidance: make every preset proactively discover and use
+  // skills. Registered through the host systemPrompt registry so it applies to
+  // all sessions (not only the make-skill preset) without overriding presets.
+  const systemPrompt = typeof ctx.get === 'function' ? ctx.get('systemPrompt') : undefined
+  const enableGlobalGuidance = config.enableGlobalSkillGuidance !== false
+  if (enableGlobalGuidance && systemPrompt && typeof systemPrompt.section === 'function' && typeof ctx.effect === 'function') {
+    ctx.effect(() => systemPrompt.section({
+      name: 'skill-forge:use-skills',
+      order: 500,
+      interpolate: false,
+      text: [
+        'Skill usage (Skill Forge):',
+        '- A catalog of available skills may be present in the conversation. Read it before acting on a task.',
+        '- If a listed skill matches the user\'s request, load it with the `skill` tool BEFORE doing the work, and follow its instructions. Do not guess a skill\'s contents from its one-line summary.',
+        '- Choose the most relevant skill(s) from the request intent; if none match, proceed normally.',
+        '- When several skills apply, load them all up front. Follow any in-skill references only as needed.',
+        '- Do not claim you used a skill unless you actually loaded it.',
+      ].join('\n'),
+    }), 'skill-forge: global skill-usage guidance')
+  }
+
   const handle = async (req, res) => {
     let payload
     try {

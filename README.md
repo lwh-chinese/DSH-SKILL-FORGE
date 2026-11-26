@@ -43,7 +43,18 @@ skill 来源：
 
 bundle patch 声明一个 agent 预设（`preset-make-skill`，order 5，id `make-skill`）。它设置「skill 创作者」人设，并挂载：`dsh-persona`、`dsh-tool-fs`、`dsh-tool-fs-search`、`dsh-skill-filesystem`、`dsh-tool-skill`、`dsh-tool-todo`、`dsh-tool-ask-user`，以及一个压缩组（`dsh-compaction-basic`、`dsh-command-compact`）。它像其它预设一样，可以在新建会话时从预设列表里选。
 
-### 6. GitHub 搜索与提示词增强
+### 6. 全局 skill 使用引导（所有预设）
+
+插件通过 `ctx.systemPrompt.section()` 注册一条**全局**系统提示词引导，对**所有预设模式**（standard / ptc / minimal / cordis 以及自定义预设）都生效，而不仅限于「制作 skill」预设。内容是：
+
+- 会话中若出现 skill 目录，先阅读它再动手。
+- 当用户请求与某个 skill 匹配时，先用 `skill` 工具加载它再开始工作，不凭一行摘要猜内容。
+- 多个 skill 相关时一次性全部加载；没有匹配的就照常处理。
+- 只有真正加载过的 skill 才能说用过。
+
+这样 AI 会根据用户提示词自动理解并使用相关 skill。这条引导通过宿主注册表实现，不修改、不覆盖任何官方预设；可用配置项 `enableGlobalSkillGuidance: false` 关闭。
+
+### 7. GitHub 搜索与提示词增强
 
 点「从 GitHub 搜索」会打开弹窗：
 
@@ -120,6 +131,7 @@ GitHub 搜索优先用原生 HTTPS（针对 MITM 代理做了宽松 TLS 回退�
 |---|---|
 | `GITHUB_TOKEN` 环境变量 | 提高 GitHub 搜索的速率限制 |
 | `customSkillDirs`（DSH 的 skill 配置） | 增加额外 skill 根目录，面板会扫描并管理它们 |
+| `enableGlobalSkillGuidance: false`（插件 config） | 关闭对所有预设生效的全局 skill 使用引导 |
 
 ## 实现说明
 
