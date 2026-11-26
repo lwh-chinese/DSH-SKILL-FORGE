@@ -135,6 +135,7 @@ window.__ModuleLoader__.load({
         startNewChat: 'New chat',
         shownToModel: 'Now visible to the model',
         hiddenFromModel: 'Now hidden from the model',
+        enhancing: 'Enhancing prompt with a local model…',
       },
       zh: {
         title: '技能管理',
@@ -186,6 +187,7 @@ window.__ModuleLoader__.load({
         startNewChat: '新建对话',
         shownToModel: '已设为对模型可见',
         hiddenFromModel: '已设为对模型隐藏',
+        enhancing: '正在用本机模型增强提示词…',
       },
     }
     const dict = () => {
@@ -327,7 +329,7 @@ window.__ModuleLoader__.load({
 
     // GitHub skill search modal. Search results are shown as repository cards;
     // adopting one launches the "制作 skill" preset with the repo as context.
-    function GithubModal({ t, query, setQuery, items, loading, onSearch, onUse, onJump, onClose }) {
+    function GithubModal({ t, query, setQuery, items, loading, enhancing, onSearch, onUse, onJump, onClose }) {
       const onKeyDown = (e) => { if (e.key === 'Enter') { e.preventDefault(); onSearch() } }
       return h('div', { className: 'skm-overlay', onMouseDown: onClose },
         h('div', { className: 'skm-modal', role: 'dialog', 'aria-modal': 'true', onMouseDown: e => e.stopPropagation() },
@@ -348,10 +350,12 @@ window.__ModuleLoader__.load({
               }, loading ? t.searching : t.search),
             ),
             h('div', { className: 'skm-modal-actions' },
-              h('button', {
-                className: 'skm-btn', onClick: () => onJump(query), disabled: !query.trim(),
-                title: t.jumpHint, spellCheck: false,
-              }, h(Icon, { name: 'plus' }), t.startWithKeyword),
+              enhancing
+                ? h('div', { className: 'skm-detail-muted' }, t.enhancing)
+                : h('button', {
+                  className: 'skm-btn', onClick: () => onJump(query), disabled: !query.trim(),
+                  title: t.jumpHint, spellCheck: false,
+                }, h(Icon, { name: 'plus' }), t.startWithKeyword),
             ),
             h('div', { className: 'skm-gh-results' },
               loading ? h('div', { className: 'skm-detail-muted' }, t.searching)
@@ -392,6 +396,7 @@ window.__ModuleLoader__.load({
       const [ghQuery, setGhQuery] = React.useState('')
       const [ghItems, setGhItems] = React.useState([])
       const [ghLoading, setGhLoading] = React.useState(false)
+      const [enhancing, setEnhancing] = React.useState(false)
 
       const load = React.useCallback(async () => {
         setLoading(true); setError(null)
@@ -452,7 +457,7 @@ window.__ModuleLoader__.load({
 
       // Open a new session under the "制作 skill" preset with a prefilled prompt.
       // Uses the official Client service ctx.uiWorkspace.startSession(workspaceId, options).
-      const startWithKeyword = (keyword, repo) => {
+      const startWithKeyword = async (keyword, repo) => {
         const kw = String(keyword || '').trim()
         if (!kw) { notify(t.keywordRequired || '请输入关键词'); return }
         // uiWorkspace is declared in this module's inject list, so direct access
@@ -478,6 +483,22 @@ window.__ModuleLoader__.load({
         } else {
           prompt = SKILL_PROMPT_TEMPLATE.replace('{kw}', kw)
         }
+
+        // Try to enhance the prompt with an available model; on any failure
+        // (no model configured, timeout, error) keep the original prompt.
+        const basePrompt = prompt
+        setEnhancing(true)
+        try {
+          const data = await api('enhancePrompt', { topic: kw, prompt: basePrompt })
+          if (data && data.ok === true && typeof data.prompt === 'string' && data.prompt.trim()) {
+            prompt = data.prompt.trim()
+          }
+        } catch (e) {
+          // fall back to the original prompt silently
+        } finally {
+          setEnhancing(false)
+        }
+
         try {
           uiWorkspace.startSession(undefined, {
             agentPreset: 'make-skill',
@@ -526,6 +547,7 @@ window.__ModuleLoader__.load({
             className: 'skm-btn primary', onClick: startCreate,
           }, h(Icon, { name: 'plus' }), t.newSkill),
         ),
+        enhancing && h('div', { className: 'skm-msg' }, t.enhancing),
         message && h('div', { className: 'skm-msg' }, message),
         error && h('div', { className: 'skm-msg err' }, t.error + ': ' + error),
         creating && h('div', { className: 'skm-form' },
@@ -642,7 +664,7 @@ window.__ModuleLoader__.load({
             ),
           ),
         ghOpen && h(GithubModal, {
-          t, query: ghQuery, setQuery: setGhQuery, items: ghItems, loading: ghLoading,
+          t, query: ghQuery, setQuery: setGhQuery, items: ghItems, loading: ghLoading, enhancing,
           onSearch: doGithubSearch,
           onUse: (kw, repo) => startWithKeyword(kw, repo),
           onJump: (kw) => startWithKeyword(kw, null),

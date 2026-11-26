@@ -362,6 +362,117 @@ async function fetchGithubJson(url, headers, webSvc) {
   }
 }
 
+/**
+ * Enhance a user's short skill topic into a detailed prompt using an available
+ * local/configured model. Returns null when no usable provider/model exists or
+ * generation fails, so the caller can fall back to the original prompt.
+ * `getLlm` is injected so this stays testable and uses a soft service lookup.
+ */
+async function enhancePromptText(topic, rawPrompt, getLlm, diag) {
+  const llm = typeof getLlm === 'function' ? getLlm() : undefined
+  if (!llm || typeof llm.stream !== 'function' || typeof llm.listProviders !== 'function') return null
+  const attempts = []
+  try {
+    const providers = llm.listProviders() || []
+    if (!providers.length) { if (diag) diag.reason = 'no live provider'; return null }
+
+    // Third-party / free model plugins (ourfreemodel, workbuddy, ...) are valid
+    // providers too. Prefer first-party routes first, then try EVERY remaining
+    // provider so a balance/auth failure on one does not block the others.
+    const preferred = ['deepseek-official', 'deepseek-account', 'deepseek-api-key', 'pi-ai']
+    const ordered = []
+    for (const id of preferred) {
+      for (const p of providers) if (p.id === id && !ordered.includes(p)) ordered.push(p)
+    }
+    for (const p of providers) if (!ordered.includes(p)) ordered.push(p)
+
+    // Collect (provider, model) candidates: first model of each provider, then
+    // remaining models, so we try one model per provider before exhausting a
+    // single provider's list.
+    const candidates = []
+    const perProvider = new Map()
+    for (const p of ordered) {
+      try {
+        const models = (await llm.listModels(p.id)) || []
+        const ids = models.map(m => m.id).filter(Boolean)
+        perProvider.set(p.id, ids.length)
+        for (const mid of ids) candidates.push({ provider: p.id, model: mid })
+      } catch (e) {
+        perProvider.set(p.id, 0)
+      }
+    }
+    // Round-robin: pick first model of each provider, then second, etc.
+    const maxLen = Math.max(0, ...[...perProvider.values()])
+    const roundRobin = []
+    for (let i = 0; i < maxLen; i++) {
+      for (const p of ordered) {
+        const ids = []
+        for (const c of candidates) if (c.provider === p.id) ids.push(c.model)
+        if (ids[i]) roundRobin.push({ provider: p.id, model: ids[i] })
+      }
+    }
+    if (!roundRobin.length) { if (diag) diag.reason = 'no provider exposed any model'; return null }
+    if (diag) diag.providers = Object.fromEntries(perProvider)
+
+    const sys = [
+      'You rewrite short user requests into a single, clear, self-contained instruction for an AI agent that creates DeepSeek Harness (DSH) skills.',
+      'Rules:',
+      '- Keep the user\'s original intent and language (Chinese input -> Chinese output).',
+      '- Do NOT answer the task; only output the improved instruction text.',
+      '- Make the instruction concrete and actionable: ask the agent to research existing conventions, then create a directory-style skill (<name>/SKILL.md) with a kebab-case name, required frontmatter (name and description) and a clear description of when to use it, plus executable step-by-step instructions in the body.',
+      '- Ask it to avoid hard-coded one-off paths and to keep instructions reusable.',
+      '- Output only the improved instruction, no preamble, no quotes, no markdown fences.',
+    ].join('\n')
+    const userText = [
+      'User topic: ' + String(topic || '').trim(),
+      '',
+      'Current draft instruction:',
+      String(rawPrompt || '').trim(),
+      '',
+      'Rewrite the draft into one improved instruction now.',
+    ].join('\n')
+
+    // Overall budget so several failing providers cannot hang the UI.
+    const deadline = Date.now() + 45000
+    for (const cand of roundRobin) {
+      if (Date.now() > deadline) { if (diag) diag.reason = 'time budget exhausted'; return null }
+      let text = ''
+      const controller = new AbortController()
+      const remaining = Math.max(1000, deadline - Date.now())
+      const timer = setTimeout(() => controller.abort(), Math.min(remaining, 20000))
+      try {
+        for await (const chunk of llm.stream({
+          provider: cand.provider, model: cand.model,
+          system: sys,
+          messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
+          maxTokens: 700,
+          signal: controller.signal,
+        })) {
+          if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
+          if (chunk && chunk.type === 'finish' && chunk.reason && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
+            attempts.push(cand.provider + '/' + cand.model + ': ' + chunk.reason.kind + ' ' + ((chunk.reason.failure && chunk.reason.failure.message) || ''))
+            break // try next candidate
+          }
+        }
+      } catch (e) {
+        attempts.push(cand.provider + '/' + cand.model + ': exception ' + (e instanceof Error ? e.message : String(e)))
+      } finally {
+        clearTimeout(timer)
+      }
+      const trimmed = text.trim()
+      if (trimmed) {
+        if (diag) { diag.provider = cand.provider; diag.model = cand.model }
+        return trimmed
+      }
+    }
+    if (diag) { diag.reason = 'all candidates failed'; diag.attempts = attempts.slice(0, 8) }
+    return null
+  } catch (error) {
+    if (diag) diag.reason = 'exception: ' + (error instanceof Error ? error.message : String(error))
+    return null
+  }
+}
+
 export function apply(ctx, config = {}) {
   const webServer = ctx.webServer ?? ctx.get?.('webServer')
   if (!webServer || typeof webServer.register !== 'function') {
@@ -375,6 +486,9 @@ export function apply(ctx, config = {}) {
   const skillsSvc = typeof ctx.get === 'function' ? ctx.get('skills') : undefined
   // DSH's web service uses the deployment's configured network stack (proxy/CA).
   const webSvc = typeof ctx.get === 'function' ? ctx.get('web') : undefined
+  // Optional LLM runtime for prompt enhancement. Soft lookup: when no model is
+  // configured the enhancement API returns ok:false and the client falls back.
+  const llmSvc = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
 
   const handle = async (req, res) => {
     let payload
@@ -457,6 +571,30 @@ export function apply(ctx, config = {}) {
         switch (op) {
           case 'list': {
             return send(res, 200, { ok: true, ...(await listSkills(config, skillsSvc)) })
+          }
+          case 'enhancePrompt': {
+            // Enhance a skill-creation prompt with an available local/configured
+            // model. If none works, return ok:false and the client keeps the
+            // original prompt unchanged.
+            const topic = String(payload.topic || '').trim()
+            const prompt = String(payload.prompt || '').trim()
+            if (!topic && !prompt) return send(res, 400, { ok: false, error: '缺少输入内容' })
+            const llmReady = !!(llmSvc && typeof llmSvc.stream === 'function')
+            let providerCount = -1
+            if (llmReady && typeof llmSvc.listProviders === 'function') {
+              try { providerCount = (llmSvc.listProviders() || []).length } catch (e) { providerCount = -1 }
+            }
+            const diag = { llmReady, providerCount }
+            const enhanced = await enhancePromptText(topic || prompt, prompt, () => llmSvc, diag)
+            if (!enhanced) {
+              return send(res, 200, {
+                ok: false,
+                error: 'no usable model',
+                diag,
+                prompt: prompt || topic,
+              })
+            }
+            return send(res, 200, { ok: true, prompt: enhanced })
           }
           case 'searchGithub': {
             // Search GitHub repositories for skills matching the keyword. Uses the

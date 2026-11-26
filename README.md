@@ -12,6 +12,7 @@ A DSH plugin that adds a left-sidebar panel for managing installed skills, plus 
 - Creates a directory-style skill (`<name>/SKILL.md`) in the user skill root, and deletes skills. All paths are validated against the skill roots.
 - Declares an agent preset `make-skill` (`preset-make-skill`) via the bundle patch. The preset sets a skill-author persona and mounts file read/write, file search, skill filesystem, skill loader, todo, ask-user and a compaction group.
 - Adds a GitHub repository search: type a keyword to search public repositories, then "adopt" one to open a new session in the `make-skill` preset with the repo context prefilled, or start that session directly from the keyword.
+- Before jumping to the new session, the plugin tries to enhance the draft prompt with an available configured model (`ctx.llm`, first usable provider/model). If no model is usable (none configured, insufficient balance, timeout, error), it silently keeps the original prompt and still opens the session.
 
 ## Install / 安装
 
