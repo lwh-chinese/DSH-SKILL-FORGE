@@ -76,9 +76,41 @@ GitHub 搜索优先用原生 HTTPS（针对 MITM 代理做了宽松 TLS 回退�
 
 ## 安装
 
-在 DSH 里打开 **插件 → 添加插件**，选择本插件目录。刷新页面后，左侧栏出现「技能」图标即生效。
+### 方式一：从 GitHub 仓库安装（推荐）
 
-`package.json` 声明了指向 `cordis.patch.yml` 的 `dsh.bundle` manifest，因此也可以用 `dsh plugin add` 从仓库安装。
+本仓库的 `package.json` 声明了 `dsh.bundle` manifest（指向 `cordis.patch.yml`），可以直接从仓库地址安装：
+
+1. 在 DSH 里打开 **插件（Plugins）** 面板。
+2. 点 **添加插件 / Add plugin**，选择「从 GitHub 安装」并填入仓库地址：
+   ```
+   https://github.com/lwh-chinese/DSH-SKILL-FORGE
+   ```
+3. 等待安装完成，在插件列表里确认 `dsh-skill-forge` 这一行处于**启用**状态。
+4. **刷新 DSH 页面**（这一步很重要：左侧栏入口属于 Web 客户端，不刷新不会出现）。
+5. 左侧栏出现「技能」图标即安装成功。
+
+### 方式二：从本地目录安装（开发 / 离线）
+
+如果你已经把源码克隆或下载到本地：
+
+1. 打开 **插件 → 添加插件**，选择「添加本地目录」。
+2. 选中包含 `package.json` 的插件根目录（例如 `E:\DSH\dsh-skill-forge`）。
+3. 安装完成后同样**刷新页面**。
+
+### 验证安装
+
+- 左侧栏出现「技能」图标，点击能打开管理面板并列出 skill。
+- 在「新建会话」的预设列表中能看到「制作 skill」预设。
+- 若插件行显示未激活或报错，先看 **插件** 面板里的诊断信息，通常是 DSH 版本不支持 `dsh.bundle` 或缺少 Web 客户端。
+
+### 卸载
+
+在 **插件** 面板里禁用或移除 `dsh-skill-forge` 对应条目，刷新页面后左侧栏入口消失。
+
+### 前提
+
+- DSH 版本需支持 `dsh.bundle` 插件和 Web 客户端（0.2.x 及以上）。
+- 无需额外依赖：预设用到的官方包随 DSH 一起分发。
 
 ## 配置
 

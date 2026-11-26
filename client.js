@@ -29,12 +29,16 @@ window.__ModuleLoader__.load({
     const SKILL_PROMPT_TEMPLATE = [
       '请帮我制作一个关于「{kw}」的 DSH skill。',
       '',
-      '请先调研相关做法与已有 skill 的写法，提炼出可复用的任务模式，再按 DSH skill 规范创建：',
+      '动手前请先充分利用 skill：',
+      '1. 用 `skill` 工具加载 `dsh-doc`，查阅 skill / preset / 插件的权威规范，不要凭记忆猜；',
+      '2. 从会话的 skill catalog 里加载最相关的一到两个已有 skill 作为写法参考。',
+      '',
+      '调研完成后再按 DSH skill 规范创建：',
       '1. 目录式技能 <name>/SKILL.md，name 用 kebab-case；',
       '2. frontmatter 必须包含 name 与 description，description 写清触发场景，可选 whenToUse；',
       '3. 正文是给模型看的可执行指令，步骤清晰、可验证，避免无关内容；需要时再引入 references/、scripts/、assets/ 资源；',
       '4. 保持指令中立、可复用，不硬编码一次性路径。',
-      '完成后说明新建 skill 的名称、位置与触发场景。',
+      '完成后说明新建 skill 的名称、位置、触发场景，以及你加载了哪些 skill 作为参考。',
     ].join('\n')
 
     // --- app base prefix (reverse-proxy / subpath compatible) ---
