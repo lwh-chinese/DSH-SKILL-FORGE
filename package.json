@@ -1,9 +1,9 @@
 {
   "name": "dsh-skill-forge",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
-  "description": "左侧栏入口的 DSH 技能管理器：列出、筛选、查看、启用/停用、新建、删除与从 GitHub 直接安装 skill，附带制作 skill 预设与全局 skill 引导。",
+  "description": "左侧栏入口的 DSH 技能管理器：列出、筛选、查看、启用/停用、新建、删除与从 GitHub 直接安装 skill，附带制作 skill 预设、全局 skill 引导，以及 @ / + 两处选技能入口。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -24,7 +24,7 @@
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-ui-input-trigger"]
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-workspace", "@deepseek-ai/dsh-client-ui-input-trigger", "@deepseek-ai/dsh-client-ui-commands"]
     }
   }
 }

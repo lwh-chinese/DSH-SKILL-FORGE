@@ -87,6 +87,22 @@ window.__ModuleLoader__.load({
       return data
     }
 
+    // The "@" source presents installed skills as ONE drillable category row
+    // ("技能") that descends into the skill list — the same two-step shape the
+    // built-in @reference source uses for folders. Typing a name directly still
+    // type-ahead matches, so `@pdf` keeps working without drilling first.
+    //
+    // The drill inserts `@技能/` into the draft (the token is replaced by the
+    // returned text, trigger char included, exactly like @reference's
+    // `@folder/`), which makes the query `技能/` — the descent marker.
+    const SKILL_GROUP = '技能'
+    const SKILL_GROUP_TOKEN = '@' + SKILL_GROUP + '/'
+
+    function skillGroupQuery(query) {
+      const q = String(query || '')
+      return q.trim().startsWith(SKILL_GROUP) ? q.trim().slice(SKILL_GROUP.length).replace(/^\//, '') : null
+    }
+
     // Register an "@" trigger source that lists installed skills. Picking one
     // inserts `/skillName `, which DSH's built-in dsh-tool-skill pre-step turns
     // into the skill body — so we reuse the native skill-loading path.
@@ -98,40 +114,143 @@ window.__ModuleLoader__.load({
       // filter locally instead of hitting the API on every keystroke.
       let catalog = null
       let catalogAt = 0
+      const loadCatalog = async () => {
+        const now = Date.now()
+        if (!catalog || now - catalogAt > 60 * 1000) {
+          const data = await api('mention', { query: '' })
+          catalog = data.items || []
+          catalogAt = now
+        }
+        return catalog
+      }
+      const asRow = (s, extra) => Object.assign({
+        name: s.name,
+        label: s.name,
+        description: s.description,
+        value: s.name,
+      }, extra || {})
       const source = {
         trigger: '@',
         name: 'skill-forge', // unique among @ sources; the built-in one is 'reference'
         order: 5,
-        showGroupTitle: true,
+        // No group title: the menu would render the raw source name ('skill-forge')
+        // because unknown source names are echoed verbatim. The single "技能" row
+        // already names itself.
+        showGroupTitle: false,
         async candidates(session, req) {
           try {
-            const now = Date.now()
-            if (!catalog || now - catalogAt > 60 * 1000) {
-              const data = await api('mention', { query: '' })
-              catalog = data.items || []
-              catalogAt = now
+            const list = await loadCatalog()
+            const sub = skillGroupQuery(req && req.query)
+            if (sub === null) {
+              // Top level: one big category. A non-empty query that is not the
+              // category token keeps plain type-ahead so `@pdf` still matches.
+              const q = String(req && req.query || '').trim().toLowerCase()
+              if (q === '') {
+                return [{
+                  name: SKILL_GROUP,
+                  label: SKILL_GROUP,
+                  description: (dict().browseSkills || 'Browse installed skills') + ' · ' + list.length,
+                  value: SKILL_GROUP,
+                  drill: true,
+                }]
+              }
+              return list
+                .filter(s => [s.name, s.description].some(v => String(v || '').toLowerCase().includes(q)))
+                .map(s => asRow(s))
             }
-            const q = String(req && req.query || '').trim().toLowerCase()
-            const items = q
-              ? catalog.filter(s => [s.name, s.description].some(v => String(v || '').toLowerCase().includes(q)))
-              : catalog
-            return items.map(s => ({
-              name: s.name,
-              label: s.name,
-              description: s.description,
-              value: s.name,
-              section: 'Skills',
-            }))
+            // Drilled: the skill list, filtered by whatever follows the token.
+            const needle = sub.toLowerCase()
+            return list
+              .filter(s => !needle || [s.name, s.description].some(v => String(v || '').toLowerCase().includes(needle)))
+              .map(s => asRow(s))
           } catch (e) {
             return []
           }
         },
+        header(session, req) {
+          // Breadcrumb only after the descent, mirroring @reference's folders.
+          if (req && (req.drilled === true || skillGroupQuery(req.query) !== null)) {
+            return [{ label: SKILL_GROUP, value: SKILL_GROUP, current: true }]
+          }
+          return undefined
+        },
         onPick(pick) {
-          const name = pick && pick.candidate && (pick.candidate.value || pick.candidate.name)
-          return name ? { text: '/' + name + ' ' } : undefined
+          const candidate = pick && pick.candidate
+          if (!candidate) return undefined
+          // Drilling into the category: rewrite the token to `@技能/` and keep
+          // the menu open so the skill rows load in place.
+          if (candidate.drill === true && pick.action === 'drill') {
+            return { text: SKILL_GROUP_TOKEN, continue: true }
+          }
+          const name = candidate.value || candidate.name
+          if (!name || name === SKILL_GROUP) return undefined
+          // Settling pick: `/name ` replaces the whole token, so the native
+          // skill-loading pre-step sees a plain leading slash command.
+          return { text: '/' + name + ' ' }
         },
       }
       try { ctx.effect(() => inputTriggers.registerSource(source), 'skill-forge: @ source') } catch (e) { /* ignore */ }
+    }
+
+    // Register a `/skills` client command so the composer's "+" menu (which
+    // toggles exactly the 'command' source) can pick a skill too. The popup
+    // shell consumes the `/skills` token first, so the write-back is deferred
+    // one tick to land on the settled, empty draft.
+    function registerSkillCommand(ctx) {
+      // ctx.inject waits for the service, so load order cannot silently drop
+      // this registration; a host without the service just never enters here.
+      const mount = typeof ctx.inject === 'function'
+        ? (fn) => ctx.inject(['commandUi'], fn)
+        : (fn) => { try { fn(ctx) } catch (e) { /* ignore */ } }
+      mount((scope) => {
+        let commandUi
+        try { commandUi = (scope && scope.commandUi) || (scope && typeof scope.get === 'function' ? scope.get('commandUi') : undefined) } catch (e) { return }
+        if (!commandUi || typeof commandUi.register !== 'function') return
+        const contribution = {
+          name: 'skills',
+          label: () => dict().pickSkill || 'Pick a skill',
+          description: () => dict().pickSkillHint || 'Insert a skill into the message',
+          available: () => true,
+          ui: {
+            kind: 'popupSelect',
+            searchMode: 'fuzzy-label',
+            searchLabels: () => ({
+              placeholder: dict().filter || 'Filter skills…',
+              empty: dict().empty || 'No skills found.',
+              noResults: dict().noFilterMatch || 'No skills match this filter.',
+            }),
+            options: async () => {
+              const data = await api('mention', { query: '' })
+              return (data.items || []).map(s => ({
+                id: s.name,
+                label: s.name,
+                ...(s.description ? { detail: s.description } : {}),
+              }))
+            },
+            onSelect: (option, session) => {
+              const text = '/' + option.id + ' '
+              // The popup consumes its `/skills` token right after this returns;
+              // defer so the insertion lands on the post-consume draft.
+              setTimeout(() => {
+                try {
+                  const sessions = typeof scope.get === 'function' ? scope.get('sessions') : undefined
+                  const conversation = typeof scope.get === 'function' ? scope.get('conversation') : undefined
+                  const binding = sessions && typeof sessions.binding === 'function' ? sessions.binding(session.sessionId) : undefined
+                  if (!binding || !conversation || !conversation.input) return
+                  // for() requires the retained Session scope, which is binding.ctx.
+                  const input = conversation.input.for(binding.ctx)
+                  if (!input) return
+                  const snapshot = input.state && typeof input.state.getSnapshot === 'function' ? input.state.getSnapshot() : undefined
+                  const cur = String(snapshot && snapshot.draft || '')
+                  input.setDraft(cur.trim() === '' ? text : cur.replace(/\s+$/, '') + ' ' + text)
+                  input.focus()
+                } catch (e) { /* insertion is best-effort; the pick still resolves */ }
+              }, 0)
+            },
+          },
+        }
+        try { scope.effect(() => commandUi.register(contribution), 'skill-forge: /skills contribution') } catch (e) { /* ignore */ }
+      })
     }
 
     // --- UI strings (no locale-service dependency for labels; also register dicts) ---
@@ -199,6 +318,9 @@ window.__ModuleLoader__.load({
         installed: 'Installed',
         installChooseRoot: 'Install into',
         noFilterMatch: 'No skills match this filter.',
+        browseSkills: 'Browse installed skills',
+        pickSkill: 'Pick a skill',
+        pickSkillHint: 'Insert a skill into the message',
       },
       zh: {
         title: '技能管理',
@@ -263,6 +385,9 @@ window.__ModuleLoader__.load({
         installed: '已安装',
         installChooseRoot: '安装到',
         noFilterMatch: '没有符合筛选条件的技能。',
+        browseSkills: '浏览已安装的技能',
+        pickSkill: '选择一个技能',
+        pickSkillHint: '把技能插入到消息里',
       },
     }
     const dict = () => {
@@ -405,6 +530,10 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M12 3v12M7 10l5 5 5-5' }),
         h('path', { d: 'M4 20h16' })),
       refresh: h('path', { d: 'M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6' }),
+      external: h(React.Fragment, null,
+        h('path', { d: 'M14 4h6v6' }),
+        h('path', { d: 'M20 4l-9 9' }),
+        h('path', { d: 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5' })),
       search: h(React.Fragment, null,
         h('circle', { cx: 11, cy: 11, r: 7 }),
         h('path', { d: 'M20 20l-4-4' })),
@@ -412,6 +541,22 @@ window.__ModuleLoader__.load({
     }
     function Icon({ name }) {
       return h('svg', { className: 'skm-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true' }, ICON_PATHS[name])
+    }
+
+    // Open an external URL the way the official chat surface does: prefer a
+    // browser tab in the right sidebar when that surface is available, else a
+    // plain window.open (which the Electron shell hands to the OS browser).
+    function openExternal(url) {
+      if (!url) return
+      try {
+        const sidebarRight = clientCtx && typeof clientCtx.get === 'function' ? clientCtx.get('sidebarRight') : undefined
+        const tabs = clientCtx && typeof clientCtx.get === 'function' ? clientCtx.get('sidebarRightTabs') : undefined
+        if (sidebarRight && typeof sidebarRight.openTab === 'function' && tabs && typeof tabs.get === 'function' && tabs.get('browser') !== undefined) {
+          sidebarRight.openTab('browser', { params: { url } })
+          return
+        }
+      } catch (e) { /* fall through to window.open */ }
+      try { window.open(url, '_blank', 'noopener,noreferrer') } catch (e) { /* ignore */ }
     }
 
     // GitHub skill search modal. Search results are shown as repository cards;
@@ -459,6 +604,10 @@ window.__ModuleLoader__.load({
                       ),
                     ),
                     h('div', { className: 'skm-gh-actions' },
+                      h('button', {
+                        className: 'skm-icon-btn', title: t.openGithub, 'aria-label': t.openGithub,
+                        onClick: () => openExternal(repo.htmlUrl),
+                      }, h(Icon, { name: 'external' })),
                       h('button', {
                         className: 'skm-btn', title: t.installHint,
                         disabled: !!installingRepo,
@@ -854,11 +1003,16 @@ window.__ModuleLoader__.load({
     return {
       // uiWorkspace provides startSession(); inputTriggers provides the "@ skill"
       // source. Both are shipped DSH Client services (also in dsh.client.inject).
+      // commandUi/sessions are looked up softly via ctx.get() inside
+      // registerSkillCommand so a missing one degrades that feature alone
+      // instead of blocking the whole client module.
       inject: ['slots', 'uiWorkspace', 'inputTriggers'],
       apply(ctx) {
         clientCtx = ctx
-        // @ skill mention source is independent of the sidebar slots.
+        // @ skill mention source and the /skills command are independent of the
+        // sidebar slots, so register them even if the slots are unavailable.
         registerSkillMentionSource(ctx)
+        registerSkillCommand(ctx)
         const slots = (() => { try { return ctx.slots ?? ctx.get?.('slots') } catch (e) { return undefined } })()
         const layout = (() => { try { return ctx.layout ?? ctx.get?.('layout') } catch (e) { return undefined } })()
         if (!slots || typeof slots.inject !== 'function') return
