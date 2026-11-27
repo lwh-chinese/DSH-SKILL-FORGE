@@ -76,15 +76,38 @@ window.__ModuleLoader__.load({
     }
     const API = absAppPath('/dsh-skill-forge-api')
 
-    async function api(op, extra) {
-      const res = await fetch(API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({ op }, extra || {})),
-      })
-      const data = await res.json()
-      if (!data || data.ok !== true) throw new Error((data && data.error) || ('HTTP ' + res.status))
-      return data
+    async function api(op, extra, options) {
+      const opts = options || {}
+      // Never let a call hang: a stalled route would otherwise leave the @
+      // menu's group pending forever (permanent skeleton) and pile up
+      // in-flight requests that starve other sources.
+      const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 20000
+      const outer = opts.signal
+      const controller = typeof AbortController === 'function' ? new AbortController() : undefined
+      const timer = controller ? setTimeout(() => { try { controller.abort() } catch (e) { /* ignore */ } }, timeoutMs) : undefined
+      let off
+      if (controller && outer && typeof outer.addEventListener === 'function') {
+        if (outer.aborted) { try { controller.abort() } catch (e) { /* ignore */ } }
+        else {
+          const onAbort = () => { try { controller.abort() } catch (e) { /* ignore */ } }
+          outer.addEventListener('abort', onAbort)
+          off = () => { try { outer.removeEventListener('abort', onAbort) } catch (e) { /* ignore */ } }
+        }
+      }
+      try {
+        const res = await fetch(API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({ op }, extra || {})),
+          ...(controller ? { signal: controller.signal } : {}),
+        })
+        const data = await res.json()
+        if (!data || data.ok !== true) throw new Error((data && data.error) || ('HTTP ' + res.status))
+        return data
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+        if (off) off()
+      }
     }
 
     // The "@" source presents installed skills as ONE drillable category row
@@ -110,18 +133,41 @@ window.__ModuleLoader__.load({
       let inputTriggers
       try { inputTriggers = (ctx && ctx.inputTriggers) || (ctx && typeof ctx.get === 'function' ? ctx.get('inputTriggers') : undefined) } catch (e) { return }
       if (!inputTriggers || typeof inputTriggers.registerSource !== 'function') return
-      // Short-lived cache: the full catalog rarely changes while typing, so
-      // filter locally instead of hitting the API on every keystroke.
+      // Catalog state shared by every call of this source.
+      //
+      // This function runs on EVERY keystroke, and the Host's `mention` op
+      // walks every skill root (junctions cross drives). Awaiting that on the
+      // keystroke path piles up requests, saturates the Host, and stalls the
+      // OTHER @ sources too — the menu then looks frozen behind permanent
+      // skeletons. So: never block when a catalog is already cached, and for
+      // the top-level row never block at all (the row needs no count).
+      const CATALOG_TTL_MS = 60 * 1000
       let catalog = null
       let catalogAt = 0
-      const loadCatalog = async () => {
-        const now = Date.now()
-        if (!catalog || now - catalogAt > 60 * 1000) {
-          const data = await api('mention', { query: '' })
-          catalog = data.items || []
-          catalogAt = now
+      let inflight = null
+      const stale = () => catalog !== null && Date.now() - catalogAt > CATALOG_TTL_MS
+      // Single-flight: concurrent keystrokes share one request instead of
+      // stacking a new one each time.
+      const refresh = (signal) => {
+        if (inflight) return inflight
+        const run = api('mention', { query: '' }, { signal, timeoutMs: 8000 })
+          .then((data) => {
+            catalog = data.items || []
+            catalogAt = Date.now()
+            return catalog
+          })
+          .catch(() => catalog || [])
+          .finally(() => { inflight = null })
+        inflight = run
+        return run
+      }
+      // Await only when we truly have nothing to show yet.
+      const ensureCatalog = async (signal) => {
+        if (catalog !== null) {
+          if (stale()) void refresh() // revalidate in the background
+          return catalog
         }
-        return catalog
+        return refresh(signal)
       }
       const asRow = (s, extra) => Object.assign({
         name: s.name,
@@ -138,27 +184,33 @@ window.__ModuleLoader__.load({
         // already names itself.
         showGroupTitle: false,
         async candidates(session, req) {
+          const signal = req && req.signal
           try {
-            const list = await loadCatalog()
             const sub = skillGroupQuery(req && req.query)
             if (sub === null) {
               // Top level: one big category. A non-empty query that is not the
               // category token keeps plain type-ahead so `@pdf` still matches.
               const q = String(req && req.query || '').trim().toLowerCase()
               if (q === '') {
+                // No count here on purpose: this row must render instantly.
+                // Warm the catalog in the background so the drill below is
+                // already local.
+                if (catalog === null || stale()) void refresh()
                 return [{
                   name: SKILL_GROUP,
                   label: SKILL_GROUP,
-                  description: (dict().browseSkills || 'Browse installed skills') + ' · ' + list.length,
+                  description: dict().browseSkills || 'Browse installed skills',
                   value: SKILL_GROUP,
                   drill: true,
                 }]
               }
+              const list = await ensureCatalog(signal)
               return list
                 .filter(s => [s.name, s.description].some(v => String(v || '').toLowerCase().includes(q)))
                 .map(s => asRow(s))
             }
             // Drilled: the skill list, filtered by whatever follows the token.
+            const list = await ensureCatalog(signal)
             const needle = sub.toLowerCase()
             return list
               .filter(s => !needle || [s.name, s.description].some(v => String(v || '').toLowerCase().includes(needle)))

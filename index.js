@@ -387,6 +387,14 @@ function cacheGet(key) {
 }
 function cacheSet(key, value) { searchCache.set(key, { at: Date.now(), value }) }
 
+// The "@ skill" menu asks for its catalog on every keystroke, and listSkills()
+// walks every skill root on disk (junctions cross drives). A short TTL keeps
+// that off the per-keystroke path; the panel's own refresh uses `list`, which
+// stays uncached, so explicit actions are never stale.
+const MENTION_TTL_MS = 15 * 1000
+const mentionCache = { items: null, at: 0 }
+function getMentionCache() { return mentionCache }
+
 /**
  * Fetch JSON from GitHub. Native https is primary (it proved reliable against
  * the deployment's MITM proxy); DSH's web service is a fallback. Retries once
@@ -679,15 +687,27 @@ export function apply(ctx, config = {}) {
           }
           case 'mention': {
             // Lightweight catalog for the "@ skill" trigger source. Returns only
-            // name/description of model-visible skills, filtered by the query.
+            // name/description of model-visible skills. The client filters
+            // locally, so this must stay cheap: a full listSkills() scans every
+            // skill root (junctions included) and doing that per keystroke
+            // starves the Host and makes the whole @ menu feel frozen.
+            const mentionCache = getMentionCache()
+            const now = Date.now()
+            let items = mentionCache.items
+            if (items === null || now - mentionCache.at > MENTION_TTL_MS) {
+              const { skills } = await listSkills(config, skillsSvc)
+              items = skills
+                .filter(s => !s.disabled)
+                .slice(0, 200)
+                .map(s => ({ name: s.name, description: s.description || '' }))
+              mentionCache.items = items
+              mentionCache.at = now
+            }
             const q = String(payload.query || '').trim().toLowerCase()
-            const { skills } = await listSkills(config, skillsSvc)
-            const items = skills
-              .filter(s => !s.disabled)
-              .filter(s => !q || [s.name, s.description].some(v => String(v || '').toLowerCase().includes(q)))
-              .slice(0, 40)
-              .map(s => ({ name: s.name, description: s.description || '' }))
-            return send(res, 200, { ok: true, items })
+            const out = q
+              ? items.filter(s => [s.name, s.description].some(v => String(v || '').toLowerCase().includes(q))).slice(0, 40)
+              : items
+            return send(res, 200, { ok: true, items: out })
           }
           case 'enhancePrompt': {
             // Enhance a skill-creation prompt with an available local/configured
