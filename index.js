@@ -9,6 +9,11 @@
  * Compatibility: uses soft service lookup (`ctx.get`), optional chaining and
  * guarded registration. If a host does not expose `webServer` (or an older DSH
  * build lacks a feature), this plugin simply stays inert instead of throwing.
+ *
+ * Admission: on hosts that expose `connection`, every request passes through
+ * the DSH host admission fence (`connection.requestRejection`) before handling,
+ * so the route is protected by the same Host/Origin + authenticated-peer check
+ * as first-party routes. Hosts without that service skip the check (old DSH).
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -489,6 +494,12 @@ export function apply(ctx, config = {}) {
   // Optional LLM runtime for prompt enhancement. Soft lookup: when no model is
   // configured the enhancement API returns ok:false and the client falls back.
   const llmSvc = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+  // DSH host admission fence. Soft lookup for compatibility: on hosts that
+  // expose it, every route request is checked with the same Host/Origin +
+  // authenticated-peer policy used by first-party HTTP routes.
+  // Note: read through ctx.get only — direct `ctx.connection` requires an
+  // inject declaration and would throw on hosts that do not provide it.
+  const connection = typeof ctx.get === 'function' ? ctx.get('connection') : undefined
 
   // Global prompt guidance: make every preset proactively discover and use
   // skills. Registered through the host systemPrompt registry so it applies to
@@ -511,7 +522,18 @@ export function apply(ctx, config = {}) {
     }), 'skill-forge: global skill-usage guidance')
   }
 
+  /** Run the DSH host admission fence; returns true when the request was rejected. */
+  const rejected = (req, res) => {
+    if (!connection || typeof connection.requestRejection !== 'function') return false
+    const rejection = connection.requestRejection(req)
+    if (rejection === undefined) return false
+    res.statusCode = rejection
+    res.end()
+    return true
+  }
+
   const handle = async (req, res) => {
+    if (rejected(req, res)) return
     let payload
     try {
       const url = String(req.url || '')

@@ -73,6 +73,8 @@ bundle patch 声明一个 agent 预设（`preset-make-skill`，order 5，id `mak
 
 Host 半边注册一个 `webServer` 前缀路由 `/dsh-skill-forge-api`，全部为 JSON。
 
+该路由已接入 DSH 宿主的**准入检查**：每个请求在处理前都会经过 `connection.requestRejection(request)`（宿主/Origin 校验 + 已认证 Peer 校验），未认证的请求会被回以 401/403，和 DSH 自带路由使用同一套策略。面板在浏览器中发出的同源请求会自动携带已签名的浏览器 Cookie，因此正常通过，不受影响。
+
 | 操作 | 方法 | 用途 |
 |---|---|---|
 | `list` | POST | 列出所有 skill 和根目录 |

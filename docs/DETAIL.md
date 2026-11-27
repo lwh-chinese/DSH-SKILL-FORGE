@@ -17,5 +17,6 @@
 - 所有服务访问使用软获取与 try/catch，缺少某个槽位或服务时优雅降级，不影响其他插件。
 - 使用宿主主题变量与 React 模块表，不打包任何 DSH Client 内部包。
 - 管理 API 由本插件自己的 `webServer` 前缀路由提供，不依赖 Typert 代码生成或跨包 Remote。
+- 该路由在处理请求前调用 `connection.requestRejection(request)` 接入宿主准入检查（宿主/Origin 校验 + 已认证 Peer）；没有 `connection` 服务的旧宿主自动跳过，保持兼容。浏览器面板的同源请求携带已签名 Cookie，正常放行。
 
 限制：在面板中以只读方式预览 skill 正文；编辑正文请使用你熟悉的文件工具直接修改 `SKILL.md`，面板会自动反映改动。
