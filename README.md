@@ -10,7 +10,7 @@ DSH 里的 skill 来源很分散：项目目录、用户目录、agents 配置�
 
 ### 1. skill 列表面板
 
-在左侧栏注册一个入口，打开一个主面板，用表格列出所有已安装的 skill：名称、描述、来源、对模型的可见状态，以及操作按钮。
+在左侧栏注册一个入口，打开一个主面板，用表格列出所有已安装的 skill：名称、描述、来源、对模型的可见状态，以及操作按钮。顶部有筛选框，可按名称、描述或来源实时过滤；旁边显示总数 / 可见 / 隐藏三个计数。
 
 skill 来源：
 
@@ -29,7 +29,7 @@ skill 来源：
 
 点某一行的文档图标，会在该行正下方展开它的 `SKILL.md` frontmatter 和正文；再点一次收起。同一时间只展开一行。详情按 skill 缓存，重复展开不会重新请求。
 
-详情是**只读预览**。要改正文用文件工具编辑 `SKILL.md`，刷新面板即可反映改动。
+详情是**只读预览**。要改正文用文件工具编辑 `SKILL.md`，刷新面板即可反映改动。详情页里还有「复制路径」按钮，可把该 skill 的 `SKILL.md` 绝对路径复制到剪贴板。
 
 ### 3. 对模型显示/隐藏
 
@@ -54,12 +54,17 @@ bundle patch 声明一个 agent 预设（`preset-make-skill`，order 5，id `mak
 
 这样 AI 会根据用户提示词自动理解并使用相关 skill。这条引导通过宿主注册表实现，不修改、不覆盖任何官方预设；可用配置项 `enableGlobalSkillGuidance: false` 关闭。
 
-### 7. GitHub 搜索与提示词增强
+### 7. 在对话里 @ 指定 skill
+
+插件向 DSH 的输入框注册一个 `@` 候选项源。在任意会话里输入 `@`，候选列表会列出所有对模型可见的已安装 skill，可按名称或描述实时筛选。选中某个 skill 后，输入框会插入 `/skillName `，由 DSH 原生的 `dsh-tool-skill` 在发送时把该 skill 的正文注入上下文——因此真正加载的是完整 skill 内容，而不仅是一行描述。这个列表带 60 秒本地缓存，频繁输入不会反复请求。
+
+### 8. GitHub 搜索与提示词增强
 
 点「从 GitHub 搜索」会打开弹窗：
 
-- 按关键词搜索公开仓库（GitHub REST API，按星标排序，最多 12 条）。每条显示名称、描述、星标和语言，并附仓库链接。
-- 点「采用」即打开「制作 skill」预设会话，并把该仓库信息作为调研上下文预填进输入框。
+- 按关键词搜索公开仓库（GitHub REST API，按星标排序，最多 12 条）。每条显示名称、描述、星标和语言，并附仓库链接。搜索结果会缓存 5 分钟，减少匿名 API 的速率限制。
+- 点「直接安装」会把仓库里的 `SKILL.md` 下载到你可写的 DSH 技能目录（默认 `~/.dsh/skills`），无需打开浏览器或新建会话；仓库里的多个 skill 会一次性装好，同名的自动跳过。
+- 点「采用」则打开「制作 skill」预设会话，并把该仓库信息作为调研上下文预填进输入框，由 AI 帮你改写。
 - 不搜索也可以直接用同一个关键词新建会话。
 
 跳转之前，插件会尝试用已配置的模型通过 `ctx.llm` 增强草稿提示词：
@@ -78,9 +83,11 @@ Host 半边注册一个 `webServer` 前缀路由 `/dsh-skill-forge-api`，全部
 | 操作 | 方法 | 用途 |
 |---|---|---|
 | `list` | POST | 列出所有 skill 和根目录 |
+| `mention` | POST | 供 `@` 候选项源使用的轻量 skill 目录（只含可见 skill 的 name/description） |
 | 详情 | GET `?name=&source=` | 读取某个 skill 的正文和 frontmatter |
 | `enhancePrompt` | POST | 用 `ctx.llm` 增强草稿提示词；失败时返回 `ok:false` 并带回原提示词 |
-| `searchGithub` | POST | 搜索 GitHub 仓库 |
+| `searchGithub` | POST | 搜索 GitHub 仓库（带 5 分钟缓存） |
+| `installFromGithub` | POST | 把仓库里的 `SKILL.md` 直接安装到可写 skill 根目录 |
 | `setEnabled` | POST | 切换 `disable-model-invocation` |
 | `create` | POST | 创建目录式 skill |
 | `delete` | POST | 删除 skill |
@@ -131,14 +138,14 @@ GitHub 搜索优先用原生 HTTPS（针对 MITM 代理做了宽松 TLS 回退�
 
 | 输入 | 用途 |
 |---|---|
-| `GITHUB_TOKEN` 环境变量 | 提高 GitHub 搜索的速率限制 |
+| `GITHUB_TOKEN` 环境变量 | 提高 GitHub 搜索和直接安装的速率限制，并能安装私有仓库 |
 | `customSkillDirs`（DSH 的 skill 配置） | 增加额外 skill 根目录，面板会扫描并管理它们 |
 | `enableGlobalSkillGuidance: false`（插件 config） | 关闭对所有预设生效的全局 skill 使用引导 |
 
 ## 实现说明
 
 - **Host 半边（`index.js`）**：注册 HTTP 接口，从文件系统根目录和 `ctx.skills`（软获取）读取 skill，调用 `ctx.llm` 做提示词增强。
-- **Client 半边（`client.js`）**：注册侧栏入口、面板和 GitHub 弹窗。只用宿主的 React 模块和 `--dsw-alias-*` 主题变量，不引入任何 DSH Client 内部包。
+- **Client 半边（`client.js`）**：注册侧栏入口、面板、GitHub 弹窗，以及 `@` skill 候选项源（通过官方 `inputTriggers.registerSource`）。只用宿主的 React 模块和 `--dsw-alias-*` 主题变量，不引入任何 DSH Client 内部包。
 - **兼容性**：服务访问一律用软获取（`ctx.get`）并包 try/catch；每个槽位独立注册；缺少服务或槽位时降级，不影响其它插件。悬停反馈刻意做得很轻，保证深色主题下文字清晰。
 
 ## 目录结构
@@ -170,6 +177,7 @@ GitHub 搜索优先用原生 HTTPS（针对 MITM 代理做了宽松 TLS 回退�
 - **内置 skill 标着「只读」不能改** —— 它们的文件在 DSH 安装目录里，不在可写 skill 根目录。在会话里加载使用即可。
 - **详情只显示一段说明而不是正文** —— 内置/运行时 skill 不通过注册表暴露正文，在会话里用 `/技能名` 或 skill 工具加载。
 - **GitHub 搜索失败** —— 匿名请求的速率有限，设置 `GITHUB_TOKEN`；某些网络需要内置的宽松 TLS 回退。
+- **直接安装失败** —— 确认仓库里确实有 `SKILL.md`（根目录或 `skills/<名字>/SKILL.md`），默认分支是否正确；同名 skill 会被跳过以免覆盖。
 - **提示词没有被增强** —— 所有 provider 都失败了（没配模型、余额不足或调用出错）。按设计此时使用原提示词。
 
 ## 许可证

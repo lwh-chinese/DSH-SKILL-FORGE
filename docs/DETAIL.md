@@ -4,12 +4,13 @@
 
 功能：
 
-- 列出所有已安装的 skill，来源覆盖磁盘根目录（项目 `.dsh/skills`、`.agents/skills`，用户 DSH/agents `skills`，自定义目录，含目录联接/符号链接）以及 DSH 内置的 bundled/运行时 skill，显示名称、描述、来源与启用状态。
-- 查看某个 skill 的 `SKILL.md` 正文与 frontmatter。
+- 列出所有已安装的 skill，来源覆盖磁盘根目录（项目 `.dsh/skills`、`.agents/skills`，用户 DSH/agents `skills`，自定义目录，含目录联接/符号链接）以及 DSH 内置的 bundled/运行时 skill，显示名称、描述、来源与启用状态。顶部可按名称/描述/来源筛选，并显示总数、可见、隐藏计数。
+- 查看某个 skill 的 `SKILL.md` 正文与 frontmatter，并可一键复制其绝对路径。
 - 通过切换 frontmatter 中 DSH 原生的 `disable-model-invocation` 字段控制 skill 对模型的可见性（不影响原始指令正文，且不会破坏其它复杂 YAML 字段）。
 - 在用户技能根目录新建 skill（目录式 `<name>/SKILL.md`），或删除已有 skill。
 - 安装时声明 **「制作 skill」预设模式**（`preset-make-skill`）：新建会话可选，以「skill 创作者」人设启动，挂载文件读写、文件搜索、skill 文件系统与 skill 加载工具，专门用于创建、编辑和维护 skill。
-- GitHub 搜索新建：点顶部「从 GitHub 搜索」，按关键词搜索公开仓库，点「采用」即跳转到「制作 skill」预设模式的新会话，并把仓库信息作为调研上下文预填；也可直接用关键词进入制作模式。
+- 在对话里 `@` 指定 skill：向输入框注册一个 `@` 候选项源，列出所有对模型可见的 skill 并实时筛选；选中后插入 `/skillName `，由 DSH 原生 skill 工具在发送时注入完整正文（带 60 秒本地缓存）。
+- GitHub 搜索新建：点顶部「从 GitHub 搜索」，按关键词搜索公开仓库（结果缓存 5 分钟）。点「直接安装」会把仓库里的 `SKILL.md` 下载到可写技能目录，无需浏览器或新会话；点「采用」则跳转到「制作 skill」预设模式的新会话，并把仓库信息作为调研上下文预填；也可直接用关键词进入制作模式。
 - 提示词增强：跳转前会尝试用本机已配置的模型（`ctx.llm` 第一个可用 provider/model）把草稿指令改写得更具体；若没有可用模型、余额不足、超时或报错，则保留原提示词并照常跳转。
 
 兼容性：

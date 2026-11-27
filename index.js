@@ -112,12 +112,17 @@ function skillRoots(home) {
     { id: 'user-dsh', label: '用户 · DSH skills', dir: path.join(dshHome, 'skills') },
     { id: 'user-agents', label: '用户 · agents skills', dir: path.join(agentsHome, 'skills') },
   ]
-  // custom dirs from config, if provided
-  for (const dir of home.customDirs || []) {
+  // custom dirs from config, if provided. Give each a stable, unique id so a
+  // skill from one custom dir is never confused with one from another.
+  ;(home.customDirs || []).forEach((dir, i) => {
     if (typeof dir === 'string' && dir.trim()) {
-      roots.push({ id: 'custom', label: '自定义目录', dir: path.resolve(dir) })
+      roots.push({
+        id: 'custom-' + i,
+        label: '自定义目录 ' + (i + 1) + ' · ' + path.basename(path.resolve(dir)),
+        dir: path.resolve(dir),
+      })
     }
-  }
+  })
   return roots
 }
 
@@ -204,7 +209,9 @@ const SOURCE_LABELS = {
 }
 
 function labelForSource(source) {
-  return SOURCE_LABELS[source] || source || '未知来源'
+  if (SOURCE_LABELS[source]) return SOURCE_LABELS[source]
+  if (/^custom-\d+$/.test(String(source))) return '自定义目录 ' + (Number(source.slice(7)) + 1)
+  return source || '未知来源'
 }
 
 /**
@@ -336,6 +343,50 @@ function parseJsonBody(text) {
   return JSON.parse(trimmed)
 }
 
+/** Native HTTPS GET returning raw text; relaxed-TLS fallback for MITM proxies. */
+function httpsGetText(url, headers) {
+  const perform = (rejectUnauthorized) => new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, timeout: 15000, rejectUnauthorized }, (res) => {
+      // Follow one redirect (raw.githubusercontent.com sometimes 302s).
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume()
+        resolve(httpsGetText(new URL(res.headers.location, url).toString(), headers))
+        return
+      }
+      let data = ''
+      res.on('data', chunk => {
+        data += chunk
+        if (data.length > 2 * 1024 * 1024) req.destroy(new Error('response too large'))
+      })
+      res.on('end', () => resolve({ status: res.statusCode, text: data }))
+    })
+    req.on('timeout', () => req.destroy(new Error('GitHub 请求超时')))
+    req.on('error', reject)
+  })
+  return perform(true).catch(error => {
+    if (/UNABLE_TO_VERIFY|CERT|SELF_SIGNED/i.test(String(error && error.message))) return perform(false)
+    throw error
+  })
+}
+
+/** Rank a SKILL.md path: root first, then shallow skill folders, then deep/misc. */
+function rankSkillPath(p) {
+  const depth = p.split('/').length
+  if (/^SKILL\.md$/i.test(p)) return 0
+  if (/^skills\/[^/]+\/SKILL\.md$/i.test(p)) return 1
+  return 10 + depth
+}
+
+// Short-lived cache for GitHub search results; unauthenticated API is rate-limited.
+const searchCache = new Map()
+function cacheGet(key) {
+  const hit = searchCache.get(key)
+  if (!hit) return undefined
+  if (Date.now() - hit.at > 5 * 60 * 1000) { searchCache.delete(key); return undefined }
+  return hit.value
+}
+function cacheSet(key, value) { searchCache.set(key, { at: Date.now(), value }) }
+
 /**
  * Fetch JSON from GitHub. Native https is primary (it proved reliable against
  * the deployment's MITM proxy); DSH's web service is a fallback. Retries once
@@ -454,9 +505,20 @@ async function enhancePromptText(topic, rawPrompt, getLlm, diag) {
           signal: controller.signal,
         })) {
           if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
-          if (chunk && chunk.type === 'finish' && chunk.reason && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
-            attempts.push(cand.provider + '/' + cand.model + ': ' + chunk.reason.kind + ' ' + ((chunk.reason.failure && chunk.reason.failure.message) || ''))
-            break // try next candidate
+          // `reason` may be an object ({kind}) or a bare string depending on the
+          // provider; handle both so a string-returning provider does not slip
+          // through as a silent empty result.
+          if (chunk && chunk.type === 'finish' && chunk.reason) {
+            const kind = typeof chunk.reason === 'string'
+              ? chunk.reason
+              : (chunk.reason.kind || '')
+            if (kind === 'error' || kind === 'aborted') {
+              const detail = typeof chunk.reason === 'string'
+                ? ''
+                : ((chunk.reason.failure && chunk.reason.failure.message) || '')
+              attempts.push(cand.provider + '/' + cand.model + ': ' + kind + ' ' + detail)
+              break // try next candidate
+            }
           }
         }
       } catch (e) {
@@ -615,6 +677,18 @@ export function apply(ctx, config = {}) {
           case 'list': {
             return send(res, 200, { ok: true, ...(await listSkills(config, skillsSvc)) })
           }
+          case 'mention': {
+            // Lightweight catalog for the "@ skill" trigger source. Returns only
+            // name/description of model-visible skills, filtered by the query.
+            const q = String(payload.query || '').trim().toLowerCase()
+            const { skills } = await listSkills(config, skillsSvc)
+            const items = skills
+              .filter(s => !s.disabled)
+              .filter(s => !q || [s.name, s.description].some(v => String(v || '').toLowerCase().includes(q)))
+              .slice(0, 40)
+              .map(s => ({ name: s.name, description: s.description || '' }))
+            return send(res, 200, { ok: true, items })
+          }
           case 'enhancePrompt': {
             // Enhance a skill-creation prompt with an available local/configured
             // model. If none works, return ok:false and the client keeps the
@@ -653,6 +727,9 @@ export function apply(ctx, config = {}) {
             if (token) headers.Authorization = 'Bearer ' + token
             // Bias results toward skill-shaped repos.
             const searchQuery = /skill/i.test(q) ? q : (q + ' skill claude')
+            const cacheKey = searchQuery.toLowerCase()
+            const cached = cacheGet(cacheKey)
+            if (cached) return send(res, 200, Object.assign({ ok: true, cached: true }, cached))
             const url = 'https://api.github.com/search/repositories?q=' + encodeURIComponent(searchQuery)
               + '&sort=stars&order=desc&per_page=12'
             try {
@@ -672,8 +749,11 @@ export function apply(ctx, config = {}) {
                 stars: repo.stargazers_count || 0,
                 language: repo.language || '',
                 updatedAt: repo.updated_at || '',
+                defaultBranch: repo.default_branch || 'main',
               }))
-              return send(res, 200, { ok: true, items, totalCount: data.total_count || 0, query: q })
+              const value = { items, totalCount: data.total_count || 0, query: q }
+              cacheSet(cacheKey, value)
+              return send(res, 200, { ok: true, ...value })
             } catch (error) {
               return send(res, 200, {
                 ok: false,
@@ -732,6 +812,106 @@ export function apply(ctx, config = {}) {
               : `# ${name}\n\n在此编写 skill 的指令正文。\n`
             fs.writeFileSync(file, serializeFrontmatter(fm, body), 'utf8')
             return send(res, 200, { ok: true, path: file })
+          }
+          case 'installFromGithub': {
+            // Install one or more SKILL.md files from a GitHub repo directly into
+            // a writable skill root, without opening a browser or a chat session.
+            let { fullName, defaultBranch, branch, source } = payload
+            fullName = String(fullName || '').trim()
+            if (!/^[\w.-]+\/[\w.-]+$/.test(fullName)) {
+              return send(res, 400, { ok: false, error: '无效的仓库名（应为 owner/repo）' })
+            }
+            const ref = String(branch || defaultBranch || 'main')
+            const token = payload.token || config.githubToken || process.env.GITHUB_TOKEN || ''
+            const apiHeaders = {
+              Accept: 'application/vnd.github+json',
+              'User-Agent': 'dsh-skill-forge',
+              'X-GitHub-Api-Version': '2022-11-28',
+            }
+            const rawHeaders = { 'User-Agent': 'dsh-skill-forge' }
+            if (token) { apiHeaders.Authorization = 'Bearer ' + token; rawHeaders.Authorization = 'Bearer ' + token }
+
+            // 1. List the repo tree to discover SKILL.md files.
+            const treeUrl = 'https://api.github.com/repos/' + fullName + '/git/trees/' + encodeURIComponent(ref) + '?recursive=1'
+            let skillPaths
+            try {
+              const { status, json } = await fetchGithubJson(treeUrl, apiHeaders, webSvc)
+              if (status < 200 || status >= 300) {
+                return send(res, 200, { ok: false, error: '读取仓库目录失败：HTTP ' + status + '（分支 ' + ref + ' 是否存在？）' })
+              }
+              skillPaths = (json.tree || [])
+                .filter(n => n.type === 'blob' && /(^|\/)SKILL\.md$/i.test(n.path))
+                .map(n => n.path)
+            } catch (error) {
+              return send(res, 200, { ok: false, error: '无法读取仓库目录：' + (error instanceof Error ? error.message : String(error)) })
+            }
+            if (!skillPaths.length) {
+              return send(res, 200, { ok: false, error: '该仓库中未找到 SKILL.md（支持根目录或 skills/ 下的标准布局）' })
+            }
+            // Prefer a root SKILL.md, then conventional skill folders, then others.
+            skillPaths.sort((a, b) => rankSkillPath(a) - rankSkillPath(b))
+
+            // 2. Choose writable root.
+            const roots = skillRoots(homeInfo(config))
+            const root = (source && roots.find(r => r.id === source)) || roots.find(r => r.id === 'user-dsh') || roots[0]
+            if (!root) throw new Error('no writable skill root')
+            try { fs.mkdirSync(root.dir, { recursive: true }) } catch (e) { throw new Error('无法创建目录：' + e.message) }
+
+            const installed = []
+            const skipped = []
+            for (const skillPath of skillPaths.slice(0, 12)) {
+              try {
+                const rawUrl = 'https://raw.githubusercontent.com/' + fullName + '/' + encodeURIComponent(ref) + '/' + skillPath.split('/').map(encodeURIComponent).join('/')
+                let text
+                try {
+                  const { status, text: body } = await httpsGetText(rawUrl, rawHeaders)
+                  if (status < 200 || status >= 300) throw new Error('HTTP ' + status)
+                  text = body
+                } catch (e) {
+                  if (webSvc && typeof webSvc.fetch === 'function') {
+                    const result = await webSvc.fetch({ url: rawUrl, headers: rawHeaders })
+                    if (result && result.body) text = result.body
+                    else throw e
+                  } else throw e
+                }
+                const parsed = parseFrontmatter(text)
+                // Derive a safe skill name: frontmatter name, else the parent folder, else repo name.
+                let name = String(parsed.frontmatter.name || '').trim()
+                if (!name || !NAME_RE.test(name)) {
+                  const segs = skillPath.split('/')
+                  name = segs.length > 1 ? segs[segs.length - 2] : fullName.split('/')[1]
+                }
+                name = String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
+                if (!NAME_RE.test(name)) { skipped.push({ path: skillPath, reason: '无法推断合法名称' }); continue }
+                const dir = path.join(root.dir, name)
+                const file = path.join(dir, 'SKILL.md')
+                if (!isInside(root.dir, file)) { skipped.push({ path: skillPath, reason: '路径越界' }); continue }
+                if (fs.existsSync(file)) { skipped.push({ path: skillPath, reason: '同名 skill 已存在：' + name }); continue }
+                fs.mkdirSync(dir, { recursive: true })
+                // Ensure a valid frontmatter name/description even if upstream omitted them.
+                const fm = Object.assign({}, parsed.frontmatter)
+                fm.name = name
+                if (!fm.description) fm.description = 'Installed from GitHub repo ' + fullName
+                const outText = parsed.hasFrontmatter
+                  ? patchFrontmatterKey(patchFrontmatterKey(text, 'name', name), 'description', JSON.stringify(String(fm.description)))
+                  : serializeFrontmatter({ name, description: fm.description }, text)
+                fs.writeFileSync(file, outText, 'utf8')
+                installed.push({ name, path: file, sourcePath: skillPath })
+              } catch (e) {
+                skipped.push({ path: skillPath, reason: e instanceof Error ? e.message : String(e) })
+              }
+            }
+            if (!installed.length) {
+              return send(res, 200, {
+                ok: false,
+                error: '未安装任何 skill' + (skipped.length ? '：' + skipped.map(s => s.reason).join('；') : ''),
+                skipped,
+              })
+            }
+            return send(res, 200, {
+              ok: true, installed, skipped, root: root.dir,
+              message: '已安装 ' + installed.length + ' 个 skill' + (skipped.length ? '，跳过 ' + skipped.length + ' 个' : ''),
+            })
           }
           default:
             return send(res, 400, { ok: false, error: 'unknown op: ' + op })

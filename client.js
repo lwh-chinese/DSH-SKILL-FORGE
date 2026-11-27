@@ -87,6 +87,53 @@ window.__ModuleLoader__.load({
       return data
     }
 
+    // Register an "@" trigger source that lists installed skills. Picking one
+    // inserts `/skillName `, which DSH's built-in dsh-tool-skill pre-step turns
+    // into the skill body — so we reuse the native skill-loading path.
+    function registerSkillMentionSource(ctx) {
+      let inputTriggers
+      try { inputTriggers = (ctx && ctx.inputTriggers) || (ctx && typeof ctx.get === 'function' ? ctx.get('inputTriggers') : undefined) } catch (e) { return }
+      if (!inputTriggers || typeof inputTriggers.registerSource !== 'function') return
+      // Short-lived cache: the full catalog rarely changes while typing, so
+      // filter locally instead of hitting the API on every keystroke.
+      let catalog = null
+      let catalogAt = 0
+      const source = {
+        trigger: '@',
+        name: 'skill-forge', // unique among @ sources; the built-in one is 'reference'
+        order: 5,
+        showGroupTitle: true,
+        async candidates(session, req) {
+          try {
+            const now = Date.now()
+            if (!catalog || now - catalogAt > 60 * 1000) {
+              const data = await api('mention', { query: '' })
+              catalog = data.items || []
+              catalogAt = now
+            }
+            const q = String(req && req.query || '').trim().toLowerCase()
+            const items = q
+              ? catalog.filter(s => [s.name, s.description].some(v => String(v || '').toLowerCase().includes(q)))
+              : catalog
+            return items.map(s => ({
+              name: s.name,
+              label: s.name,
+              description: s.description,
+              value: s.name,
+              section: 'Skills',
+            }))
+          } catch (e) {
+            return []
+          }
+        },
+        onPick(pick) {
+          const name = pick && pick.candidate && (pick.candidate.value || pick.candidate.name)
+          return name ? { text: '/' + name + ' ' } : undefined
+        },
+      }
+      try { ctx.effect(() => inputTriggers.registerSource(source), 'skill-forge: @ source') } catch (e) { /* ignore */ }
+    }
+
     // --- UI strings (no locale-service dependency for labels; also register dicts) ---
     const STRINGS = {
       en: {
@@ -140,6 +187,18 @@ window.__ModuleLoader__.load({
         shownToModel: 'Now visible to the model',
         hiddenFromModel: 'Now hidden from the model',
         enhancing: 'Enhancing prompt with a local model…',
+        filter: 'Filter skills…',
+        total: 'Total',
+        visibleCount: 'Visible',
+        hiddenCount: 'Hidden',
+        copyPath: 'Copy path',
+        copied: 'Path copied.',
+        installDirect: 'Install directly',
+        installHint: 'Download SKILL.md from the repo into your DSH skills folder, no browser or chat needed.',
+        installing: 'Installing…',
+        installed: 'Installed',
+        installChooseRoot: 'Install into',
+        noFilterMatch: 'No skills match this filter.',
       },
       zh: {
         title: '技能管理',
@@ -192,6 +251,18 @@ window.__ModuleLoader__.load({
         shownToModel: '已设为对模型可见',
         hiddenFromModel: '已设为对模型隐藏',
         enhancing: '正在用本机模型增强提示词…',
+        filter: '筛选技能…',
+        total: '总数',
+        visibleCount: '可见',
+        hiddenCount: '隐藏',
+        copyPath: '复制路径',
+        copied: '路径已复制。',
+        installDirect: '直接安装',
+        installHint: '从仓库下载 SKILL.md 到你的 DSH 技能目录，无需打开浏览器或新建对话。',
+        installing: '安装中…',
+        installed: '已安装',
+        installChooseRoot: '安装到',
+        noFilterMatch: '没有符合筛选条件的技能。',
       },
     }
     const dict = () => {
@@ -278,6 +349,12 @@ window.__ModuleLoader__.load({
 .skm-input[readonly],.skm-textarea[readonly]{opacity:.8;cursor:default;}
 .skm-textarea{min-height:260px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical;font-size:12px;line-height:1.6;}
 .skm-row{display:flex;gap:10px;align-items:center;}
+.skm-toolbar{display:flex;align-items:center;gap:14px;margin:0 0 14px;flex-wrap:wrap;}
+.skm-filter{flex:1;min-width:220px;max-width:420px;}
+.skm-filter .skm-icon{flex:none;color:var(--dsw-alias-label-secondary);}
+.skm-stats{display:flex;gap:14px;font-size:12px;color:var(--dsw-alias-label-secondary);margin-left:auto;}
+.skm-gh-actions{display:flex;gap:8px;align-items:center;flex:none;}
+.skm-copy{flex:none;}
 .skm-nav-icon{display:block;}
 /* GitHub search modal */
 .skm-overlay{position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;
@@ -321,6 +398,12 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13' }),
         h('path', { d: 'M10 11v5M14 11v5' })),
       plus: h('path', { d: 'M12 5v14M5 12h14' }),
+      copy: h(React.Fragment, null,
+        h('rect', { x: 9, y: 9, width: 11, height: 11, rx: 2 }),
+        h('path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' })),
+      download: h(React.Fragment, null,
+        h('path', { d: 'M12 3v12M7 10l5 5 5-5' }),
+        h('path', { d: 'M4 20h16' })),
       refresh: h('path', { d: 'M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6' }),
       search: h(React.Fragment, null,
         h('circle', { cx: 11, cy: 11, r: 7 }),
@@ -333,7 +416,7 @@ window.__ModuleLoader__.load({
 
     // GitHub skill search modal. Search results are shown as repository cards;
     // adopting one launches the "制作 skill" preset with the repo as context.
-    function GithubModal({ t, query, setQuery, items, loading, enhancing, onSearch, onUse, onJump, onClose }) {
+    function GithubModal({ t, query, setQuery, items, loading, enhancing, installingRepo, onSearch, onUse, onInstall, onJump, onClose }) {
       const onKeyDown = (e) => { if (e.key === 'Enter') { e.preventDefault(); onSearch() } }
       return h('div', { className: 'skm-overlay', onMouseDown: onClose },
         h('div', { className: 'skm-modal', role: 'dialog', 'aria-modal': 'true', onMouseDown: e => e.stopPropagation() },
@@ -375,9 +458,16 @@ window.__ModuleLoader__.load({
                         repo.language && h('span', null, ' · ' + repo.language),
                       ),
                     ),
-                    h('button', {
-                      className: 'skm-btn primary', onClick: () => onUse(query || repo.name, repo),
-                    }, t.useThis),
+                    h('div', { className: 'skm-gh-actions' },
+                      h('button', {
+                        className: 'skm-btn', title: t.installHint,
+                        disabled: !!installingRepo,
+                        onClick: () => onInstall(repo),
+                      }, h(Icon, { name: 'download' }), installingRepo === repo.fullName ? t.installing : t.installDirect),
+                      h('button', {
+                        className: 'skm-btn primary', onClick: () => onUse(query || repo.name, repo),
+                      }, t.useThis),
+                    ),
                   )),
             ),
           ),
@@ -401,6 +491,8 @@ window.__ModuleLoader__.load({
       const [ghItems, setGhItems] = React.useState([])
       const [ghLoading, setGhLoading] = React.useState(false)
       const [enhancing, setEnhancing] = React.useState(false)
+      const [filter, setFilter] = React.useState('')       // local skill filter text
+      const [installingRepo, setInstallingRepo] = React.useState(null) // fullName being installed
 
       const load = React.useCallback(async () => {
         setLoading(true); setError(null)
@@ -429,6 +521,49 @@ window.__ModuleLoader__.load({
       }
 
       const rowKey = (s) => s.source + '|' + s.name
+
+      // Derived: filtered skill list + counters (total / visible / hidden).
+      const filterText = filter.trim().toLowerCase()
+      const visibleSkills = filterText
+        ? skills.filter(s => [s.name, s.description, s.sourceLabel || s.source].some(v => String(v || '').toLowerCase().includes(filterText)))
+        : skills
+      const totalCount = skills.length
+      const hiddenCount = skills.filter(s => s.disabled).length
+      const shownCount = visibleSkills.length
+
+      const copyPath = async (p) => {
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(p)
+          else {
+            const ta = document.createElement('textarea'); ta.value = p; document.body.appendChild(ta)
+            ta.select(); document.execCommand('copy'); document.body.removeChild(ta)
+          }
+          notify(t.copied || 'Path copied.')
+        } catch (e) {
+          setError(String(e && e.message || e))
+        }
+      }
+
+      // Install a GitHub repo's SKILL.md files directly, no browser/chat needed.
+      const installRepo = async (repo) => {
+        if (!repo || !repo.fullName) return
+        setInstallingRepo(repo.fullName)
+        setError(null)
+        try {
+          const data = await api('installFromGithub', {
+            fullName: repo.fullName,
+            defaultBranch: repo.defaultBranch,
+          })
+          if (!data.ok) throw new Error(data.error || 'install failed')
+          await load()
+          notify(data.message || (t.installed + ' ' + repo.fullName))
+          setGhOpen(false)
+        } catch (e) {
+          setError(String(e && e.message || e))
+        } finally {
+          setInstallingRepo(null)
+        }
+      }
 
       const toggleDetail = async (skill) => {
         const key = rowKey(skill)
@@ -551,6 +686,21 @@ window.__ModuleLoader__.load({
             className: 'skm-btn primary', onClick: startCreate,
           }, h(Icon, { name: 'plus' }), t.newSkill),
         ),
+        h('div', { className: 'skm-toolbar' },
+          h('div', { className: 'skm-search-row skm-filter' },
+            h(Icon, { name: 'search' }),
+            h('input', {
+              className: 'skm-input', value: filter, placeholder: t.filter,
+              spellCheck: false, autoComplete: 'off',
+              onChange: e => setFilter(e.target.value),
+            }),
+          ),
+          h('div', { className: 'skm-stats' },
+            h('span', null, t.total + ': ' + totalCount),
+            h('span', null, t.visibleCount + ': ' + (totalCount - hiddenCount)),
+            h('span', null, t.hiddenCount + ': ' + hiddenCount),
+          ),
+        ),
         enhancing && h('div', { className: 'skm-msg' }, t.enhancing),
         message && h('div', { className: 'skm-msg' }, message),
         error && h('div', { className: 'skm-msg err' }, t.error + ': ' + error),
@@ -592,7 +742,9 @@ window.__ModuleLoader__.load({
             )),
             h('tbody', null, skills.length === 0
               ? h('tr', null, h('td', { className: 'skm-td', colSpan: 5 }, t.empty))
-              : skills.flatMap(s => {
+              : visibleSkills.length === 0
+                ? h('tr', null, h('td', { className: 'skm-td', colSpan: 5 }, t.noFilterMatch))
+                : visibleSkills.flatMap(s => {
                 const key = rowKey(s)
                 const isOpen = expanded === key
                 const d = details[key]
@@ -653,7 +805,13 @@ window.__ModuleLoader__.load({
                         h('div', { className: 'skm-detail-k' }, t.description),
                         h('div', { className: 'skm-detail-v' }, d.frontmatter?.description || '—'),
                         h('div', { className: 'skm-detail-k' }, t.openFolder),
-                        h('div', { className: 'skm-detail-v skm-path' }, d.path),
+                        h('div', { className: 'skm-detail-v skm-row' },
+                          h('span', { className: 'skm-path', style: { flex: 1 } }, d.path),
+                          h('button', {
+                            className: 'skm-icon-btn skm-copy', title: t.copyPath, 'aria-label': t.copyPath,
+                            onClick: () => copyPath(d.path),
+                          }, h(Icon, { name: 'copy' })),
+                        ),
                       ),
                       h('div', { className: 'skm-detail-content' },
                         h('div', { className: 'skm-detail-k' }, t.content),
@@ -669,8 +827,10 @@ window.__ModuleLoader__.load({
           ),
         ghOpen && h(GithubModal, {
           t, query: ghQuery, setQuery: setGhQuery, items: ghItems, loading: ghLoading, enhancing,
+          installingRepo,
           onSearch: doGithubSearch,
           onUse: (kw, repo) => startWithKeyword(kw, repo),
+          onInstall: installRepo,
           onJump: (kw) => startWithKeyword(kw, null),
           onClose: () => setGhOpen(false),
         }),
@@ -692,11 +852,13 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      // uiWorkspace provides startSession(); it is a shipped DSH Client service
-      // (declared in this bundle's dsh.client.inject as well).
-      inject: ['slots', 'uiWorkspace'],
+      // uiWorkspace provides startSession(); inputTriggers provides the "@ skill"
+      // source. Both are shipped DSH Client services (also in dsh.client.inject).
+      inject: ['slots', 'uiWorkspace', 'inputTriggers'],
       apply(ctx) {
         clientCtx = ctx
+        // @ skill mention source is independent of the sidebar slots.
+        registerSkillMentionSource(ctx)
         const slots = (() => { try { return ctx.slots ?? ctx.get?.('slots') } catch (e) { return undefined } })()
         const layout = (() => { try { return ctx.layout ?? ctx.get?.('layout') } catch (e) { return undefined } })()
         if (!slots || typeof slots.inject !== 'function') return
