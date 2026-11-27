@@ -169,6 +169,8 @@ window.__ModuleLoader__.load({
         },
         header(session, req) {
           // Breadcrumb only after the descent, mirroring @reference's folders.
+          // Include the token case: a re-track after Enter arrives with
+          // drilled=false but query `技能/`, and the crumb should already show.
           if (req && (req.drilled === true || skillGroupQuery(req.query) !== null)) {
             return [{ label: SKILL_GROUP, value: SKILL_GROUP, current: true }]
           }
@@ -178,8 +180,11 @@ window.__ModuleLoader__.load({
           const candidate = pick && pick.candidate
           if (!candidate) return undefined
           // Drilling into the category: rewrite the token to `@技能/` and keep
-          // the menu open so the skill rows load in place.
-          if (candidate.drill === true && pick.action === 'drill') {
+          // the menu open so the skill rows load in place. Enter/click arrive as
+          // action 'pick', so key off the candidate being a drill row rather
+          // than the gesture — otherwise Enter would close the menu doing
+          // nothing.
+          if (candidate.drill === true) {
             return { text: SKILL_GROUP_TOKEN, continue: true }
           }
           const name = candidate.value || candidate.name
