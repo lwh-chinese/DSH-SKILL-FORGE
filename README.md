@@ -70,7 +70,9 @@ bundle patch 声明一个 agent 预设（`preset-make-skill`，order 5，id `mak
 
 - 按关键词搜索公开仓库（GitHub REST API，按星标排序，最多 12 条）。每条显示名称、描述、星标和语言。搜索结果会缓存 5 分钟，减少匿名 API 的速率限制。
 - 每条右侧有三个按钮：**在 GitHub 打开**（外链图标，在系统浏览器或右侧栏里打开仓库原网页）、**直接安装**、**采用**。
-- 点「直接安装」会把仓库里的 `SKILL.md` 下载到你可写的 DSH 技能目录（默认 `~/.dsh/skills`），无需打开浏览器或新建会话；仓库里的多个 skill 会一次性装好，同名的自动跳过。
+- 点「直接安装」会把仓库里的 skill **连同整个技能目录**一起装好——不只是 `SKILL.md`，还有它旁边的 `references/`、`themes/`、`scripts/`、`templates/` 和素材文件。技能正文指向的资源缺一个，这个 skill 用起来就是残的，所以安装按目录整体下载，二进制文件（图片、字体）也按字节原样保存。
+- 安装前可在弹窗里选择装到哪个根目录。默认是**用户级 `~/.dsh/skills`**，它对所有 agent 和所有项目都可见；装到项目级目录则只有该项目能用。
+- 安装结果会报告每个 skill 下载了多少文件；如果正文引用的资源没下载到（或下载失败），会直接标出缺了哪些，而不是让你在运行中途才发现。
 - 点「采用」则打开「制作 skill」预设会话，并把该仓库信息作为调研上下文预填进输入框，由 AI 帮你改写。
 - 不搜索也可以直接用同一个关键词新建会话。
 
@@ -94,7 +96,7 @@ Host 半边注册一个 `webServer` 前缀路由 `/dsh-skill-forge-api`，全部
 | 详情 | GET `?name=&source=` | 读取某个 skill 的正文和 frontmatter |
 | `enhancePrompt` | POST | 用 `ctx.llm` 增强草稿提示词；失败时返回 `ok:false` 并带回原提示词 |
 | `searchGithub` | POST | 搜索 GitHub 仓库（带 5 分钟缓存） |
-| `installFromGithub` | POST | 把仓库里的 `SKILL.md` 直接安装到可写 skill 根目录 |
+| `installFromGithub` | POST | 把仓库里的 skill **连同整个技能目录**安装到可写 skill 根目录 |
 | `setEnabled` | POST | 切换 `disable-model-invocation` |
 | `create` | POST | 创建目录式 skill |
 | `delete` | POST | 删除 skill |

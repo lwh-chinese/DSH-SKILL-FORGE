@@ -391,6 +391,12 @@ window.__ModuleLoader__.load({
         sortStatus: 'Status',
         sortSize: 'Size',
         shown: 'Shown',
+        filesWord: 'files',
+        missingRes: 'missing',
+        failedRes: 'failed to download',
+        incompleteHint: 'This skill is incomplete',
+        sharedAllAgents: 'shared by all agents',
+        installFullHint: 'Downloads the whole skill folder (SKILL.md plus references/themes/scripts), not just SKILL.md.',
       },
       zh: {
         title: '技能管理',
@@ -471,6 +477,12 @@ window.__ModuleLoader__.load({
         sortStatus: '状态',
         sortSize: '大小',
         shown: '显示',
+        filesWord: '个文件',
+        missingRes: '缺少',
+        failedRes: '下载失败',
+        incompleteHint: '这个 skill 不完整',
+        sharedAllAgents: '所有 agent 共用',
+        installFullHint: '会下载整个技能目录（SKILL.md 加 references/themes/scripts 等配套文件），不只是 SKILL.md。',
       },
     }
     const dict = () => {
@@ -564,6 +576,8 @@ window.__ModuleLoader__.load({
 .skm-sort{flex:none;gap:7px;}
 .skm-sort-label{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:nowrap;}
 .skm-select{width:auto;min-width:96px;padding:6px 9px;cursor:pointer;}
+.skm-result{display:flex;align-items:center;gap:10px;}
+.skm-install-root{gap:10px;flex-wrap:wrap;}
 .skm-gh-actions{display:flex;gap:8px;align-items:center;flex:none;}
 .skm-copy{flex:none;}
 .skm-nav-icon{display:block;}
@@ -647,8 +661,12 @@ window.__ModuleLoader__.load({
 
     // GitHub skill search modal. Search results are shown as repository cards;
     // adopting one launches the "制作 skill" preset with the repo as context.
-    function GithubModal({ t, query, setQuery, items, loading, enhancing, installingRepo, onSearch, onUse, onInstall, onJump, onClose }) {
+    function GithubModal({ t, query, setQuery, items, loading, enhancing, installingRepo, roots, installRoot, setInstallRoot, onSearch, onUse, onInstall, onJump, onClose }) {
       const onKeyDown = (e) => { if (e.key === 'Enter') { e.preventDefault(); onSearch() } }
+      // Only writable roots are offered; the shared user-level root is the
+      // default so a skill installed here is visible to every agent, not just
+      // the project it happened to be installed from.
+      const writable = (roots || []).filter(r => r && r.id && r.dir)
       return h('div', { className: 'skm-overlay', onMouseDown: onClose },
         h('div', { className: 'skm-modal', role: 'dialog', 'aria-modal': 'true', onMouseDown: e => e.stopPropagation() },
           h('div', { className: 'skm-modal-head' },
@@ -667,6 +685,15 @@ window.__ModuleLoader__.load({
                 className: 'skm-btn primary', onClick: onSearch, disabled: loading || !query.trim(),
               }, loading ? t.searching : t.search),
             ),
+            writable.length > 0 && h('div', { className: 'skm-search-row skm-install-root' },
+              h('label', { className: 'skm-sort-label' }, t.installChooseRoot),
+              h('select', {
+                className: 'skm-input skm-select', value: installRoot,
+                onChange: e => setInstallRoot(e.target.value),
+              }, writable.map(r => h('option', { key: r.id, value: r.id },
+                r.id === 'user-dsh' ? (r.label + ' · ' + t.sharedAllAgents) : r.label))),
+            ),
+            h('p', { className: 'skm-hint' }, t.installFullHint),
             h('div', { className: 'skm-modal-actions' },
               enhancing
                 ? h('div', { className: 'skm-detail-muted' }, t.enhancing)
@@ -729,6 +756,8 @@ window.__ModuleLoader__.load({
       const [filter, setFilter] = React.useState('')       // local skill filter text
       const [sortBy, setSortBy] = React.useState('name')   // name | source | status | size
       const [installingRepo, setInstallingRepo] = React.useState(null) // fullName being installed
+      const [ghResult, setGhResult] = React.useState(null) // install outcome detail, shown above the table
+      const [installRoot, setInstallRoot] = React.useState('user-dsh') // target skill root for installs
 
       const load = React.useCallback(async () => {
         setLoading(true); setError(null)
@@ -848,10 +877,29 @@ window.__ModuleLoader__.load({
           const data = await api('installFromGithub', {
             fullName: repo.fullName,
             defaultBranch: repo.defaultBranch,
-          })
+            source: installRoot || undefined,
+          }, { timeoutMs: 180000 })
           if (!data.ok) throw new Error(data.error || 'install failed')
           await load()
-          notify(data.message || (t.installed + ' ' + repo.fullName))
+          // Surface payload completeness: a skill installed without the files
+          // its body references is broken, and the user should see that here
+          // rather than discovering it mid-task.
+          const list = Array.isArray(data.installed) ? data.installed : []
+          const parts = []
+          parts.push(data.message || (t.installed + ' ' + repo.fullName))
+          const withFiles = list.filter(x => typeof x.files === 'number' && x.files > 1)
+          if (withFiles.length) {
+            parts.push(withFiles.map(x => x.name + ' · ' + x.files + ' ' + (t.filesWord || '个文件')).join('；'))
+          }
+          const incomplete = list.filter(x => (Array.isArray(x.missing) && x.missing.length) || (Array.isArray(x.failed) && x.failed.length))
+          if (incomplete.length) {
+            parts.push('⚠ ' + incomplete.map(x => {
+              const miss = (x.missing || []).slice(0, 3).join(', ')
+              const fail = (x.failed || []).slice(0, 3).join(', ')
+              return x.name + '：' + [miss && (t.missingRes || '缺少') + ' ' + miss, fail && (t.failedRes || '下载失败') + ' ' + fail].filter(Boolean).join('；')
+            }).join(' | '))
+          }
+          setGhResult(parts.join('　'))
           setGhOpen(false)
         } catch (e) {
           setError(String(e && e.message || e))
@@ -1010,6 +1058,13 @@ window.__ModuleLoader__.load({
           ),
         ),
         enhancing && h('div', { className: 'skm-msg' }, t.enhancing),
+        ghResult && h('div', { className: 'skm-msg skm-result' },
+          h('span', { style: { flex: 1 } }, ghResult),
+          h('button', {
+            className: 'skm-icon-btn', title: t.close, 'aria-label': t.close,
+            onClick: () => setGhResult(null),
+          }, '✕'),
+        ),
         message && h('div', { className: 'skm-msg' }, message),
         error && h('div', { className: 'skm-msg err' }, t.error + ': ' + error),
         creating && h('div', { className: 'skm-form' },
@@ -1147,7 +1202,7 @@ window.__ModuleLoader__.load({
           ),
         ghOpen && h(GithubModal, {
           t, query: ghQuery, setQuery: setGhQuery, items: ghItems, loading: ghLoading, enhancing,
-          installingRepo,
+          installingRepo, roots, installRoot, setInstallRoot,
           onSearch: doGithubSearch,
           onUse: (kw, repo) => startWithKeyword(kw, repo),
           onInstall: installRepo,

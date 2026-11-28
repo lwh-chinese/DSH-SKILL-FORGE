@@ -1,9 +1,9 @@
 {
   "name": "dsh-skill-forge",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "type": "module",
-  "description": "左侧栏入口的 DSH 技能管理器：列出、筛选、排序、查看、启用/停用、复制、导出、新建、删除与从 GitHub 直接安装 skill，附带制作 skill 预设、全局 skill 引导，以及 @ / + 两处选技能入口。",
+  "description": "左侧栏入口的 DSH 技能管理器：列出、筛选、排序、查看、启用/停用、复制、导出、新建、删除与从 GitHub 完整安装 skill（含 references 等配套目录），附带制作 skill 预设、全局 skill 引导，以及 @ / + 两处选技能入口。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

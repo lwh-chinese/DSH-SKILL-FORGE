@@ -377,6 +377,168 @@ function rankSkillPath(p) {
   return 10 + depth
 }
 
+/**
+ * Fetch a URL as raw bytes. The text variant above decodes to a string, which
+ * corrupts binary assets (images, fonts, archives) — skill folders ship those
+ * routinely, so installation needs the byte-exact form.
+ */
+function httpsGetBuffer(url, headers, maxBytes) {
+  const limit = typeof maxBytes === 'number' && maxBytes > 0 ? maxBytes : 8 * 1024 * 1024
+  const perform = (rejectUnauthorized) => new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, timeout: 20000, rejectUnauthorized }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume()
+        resolve(httpsGetBuffer(new URL(res.headers.location, url).toString(), headers, maxBytes))
+        return
+      }
+      const chunks = []
+      let total = 0
+      res.on('data', (chunk) => {
+        total += chunk.length
+        if (total > limit) { req.destroy(new Error('文件过大（超过 ' + Math.round(limit / 1024 / 1024) + 'MB）')); return }
+        chunks.push(chunk)
+      })
+      res.on('end', () => resolve({ status: res.statusCode, buffer: Buffer.concat(chunks) }))
+    })
+    req.on('timeout', () => req.destroy(new Error('GitHub 请求超时')))
+    req.on('error', reject)
+  })
+  return perform(true).catch(error => {
+    if (/UNABLE_TO_VERIFY|CERT|SELF_SIGNED/i.test(String(error && error.message))) return perform(false)
+    throw error
+  })
+}
+
+/**
+ * Files inside a repo that are never part of a skill payload.
+ * @param rel - repo-relative path.
+ * @returns whether the path should be skipped during installation.
+ */
+function isJunkRepoPath(rel) {
+  const segs = String(rel).split('/')
+  if (segs.some(s => s === '.git' || s === 'node_modules' || s === '.github')) return true
+  const base = segs[segs.length - 1]
+  if (/^(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|\.DS_Store|Thumbs\.db)$/i.test(base)) return true
+  if (/\.(exe|dll|so|dylib|bin|zip|tar|gz|7z|mp4|mov|psd)$/i.test(base)) return true
+  return false
+}
+
+/**
+ * Collect every blob that belongs to one skill.
+ *
+ * A skill's payload is its whole directory, not just SKILL.md: `references/`,
+ * `themes/`, `scripts/`, `templates/` and asset folders sit next to it, and a
+ * skill installed without them is broken — its instructions point at files
+ * that do not exist. For a root-level SKILL.md the payload is the repo minus
+ * obvious junk; for `a/b/SKILL.md` it is everything under `a/b/`.
+ *
+ * @param blobs - all blob paths in the repo tree.
+ * @param skillPath - repo-relative path of this skill's SKILL.md.
+ * @returns repo-relative paths to download, ordered so SKILL.md comes first.
+ */
+function collectSkillPayload(blobs, skillPath) {
+  const dir = skillPath.includes('/') ? skillPath.slice(0, skillPath.lastIndexOf('/') + 1) : ''
+  const under = blobs.filter(p => dir === '' ? true : p.startsWith(dir))
+    .filter(p => !isJunkRepoPath(dir === '' ? p : p.slice(dir.length)))
+  // Shallow files first: SKILL.md, then the top-level docs, then nested assets.
+  under.sort((a, b) => {
+    const da = a.split('/').length
+    const db = b.split('/').length
+    if (da !== db) return da - db
+    return a.localeCompare(b)
+  })
+  return under
+}
+
+/**
+ * Find local files a SKILL.md refers to that the repo shipped but that did not
+ * land on disk.
+ *
+ * Naive "referenced path missing on disk" reporting is useless: skills name
+ * plenty of paths that are supposed to be *produced* at run time
+ * (`evals/evals.json`, `iteration-1/`, `without_skill/outputs/`) or that only
+ * exist as illustrative examples inside code fences (`skill-name/`,
+ * `cloud-deploy/`). Flagging those would cry wolf on every healthy skill.
+ *
+ * The only trustworthy signal is repo membership: if the upstream tree has the
+ * path and the installed folder does not, the download genuinely failed. So the
+ * check intersects references with the repo's own blob list.
+ *
+ * @param body - SKILL.md text.
+ * @param dir - absolute skill directory on disk.
+ * @param repoPaths - repo-relative paths belonging to this skill (SKILL.md excluded is fine).
+ * @returns missing paths relative to the skill directory, capped and de-duplicated.
+ */
+function findMissingResources(body, dir, repoPaths) {
+  if (!Array.isArray(repoPaths) || repoPaths.length === 0) return []
+  const text = String(body || '')
+  // Everything the repo actually shipped, relative to the skill folder.
+  const shipped = new Set(repoPaths.map(p => p.replace(/\\/g, '/')).filter(Boolean))
+  const refs = new Set()
+  const fileRe = /(?:^|[\s(`'"])((?:\.\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:md|txt|json|ya?ml|py|js|mjs|cjs|ts|sh|ps1|css|html|svg|png|jpg|jpeg|gif|webp|toml|ini|csv))(?=[\s)`'"`,;:]|$)/gm
+  let m
+  while ((m = fileRe.exec(text)) !== null) {
+    const rel = m[1].replace(/^\.\//, '')
+    if (!rel.includes('/')) continue          // bare filename: too ambiguous
+    if (/^(https?:|www\.)/i.test(rel)) continue
+    if (rel.startsWith('node_modules/')) continue
+    refs.add(rel)
+    if (refs.size >= 400) break
+  }
+  // Directories are referenced too ("search the ./canvas-fonts directory"),
+  // and a skill missing a whole resource folder is just as broken as one
+  // missing a single file. Only accept explicit ./ or ../ forms here — a bare
+  // word would match ordinary prose.
+  const dirRe = /(?:^|[\s(`'"])(\.{1,2}\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)(?=[\s)`'"`,;:]|$)/gm
+  while ((m = dirRe.exec(text)) !== null) {
+    const rel = m[1].replace(/^\.\//, '')
+    if (!rel || rel.startsWith('..')) continue
+    if (/\.(md|txt|json|ya?ml|py|js|mjs|cjs|ts|sh|ps1|css|html|svg|png|jpg|jpeg|gif|webp|toml|ini|csv)$/i.test(rel)) continue  // already handled above
+    refs.add(rel)
+    if (refs.size >= 400) break
+  }
+  // A trailing slash is an unambiguous directory reference ("see references/").
+  const slashRe = /(?:^|[\s(`'"])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)\/(?=[\s)`'"`,;:]|$)/gm
+  while ((m = slashRe.exec(text)) !== null) {
+    const rel = m[1]
+    if (!rel || /^(https?:|www\.)/i.test(rel)) continue
+    if (rel.startsWith('node_modules')) continue
+    refs.add(rel)
+    if (refs.size >= 400) break
+  }
+  // Bare sibling filenames ("see REFERENCE.md") are real payload too, but a
+  // bare word is far too weak a signal on its own — require a reading verb
+  // right before it, or backticks around it, so ordinary prose never matches.
+  const bareRe = /(?:see|read|follow|open|consult|check|refer\s+to|described\s+in|defined\s+in|instructions\s+in|according\s+to)\s+`?([A-Za-z0-9_.-]+\.(?:md|txt|json|ya?ml|py|js|mjs|cjs|sh|ps1|csv))`?/gi
+  while ((m = bareRe.exec(text)) !== null) {
+    const rel = m[1]
+    if (/^(https?:|www\.)/i.test(rel)) continue
+    refs.add(rel)
+    if (refs.size >= 400) break
+  }
+  const tickedRe = /`([A-Za-z0-9_.-]+\.(?:md|txt|json|ya?ml|py|js|mjs|cjs|sh|ps1|csv))`/g
+  while ((m = tickedRe.exec(text)) !== null) {
+    const rel = m[1]
+    if (/^(https?:|www\.)/i.test(rel)) continue
+    refs.add(rel)
+    if (refs.size >= 400) break
+  }
+  const missing = []
+  for (const rel of refs) {
+    const clean = rel.replace(/\/+$/, '')
+    if (!clean) continue
+    // Only a path the repo actually shipped can be "missing from the install".
+    const inRepo = shipped.has(clean) || [...shipped].some(p => p === clean || p.startsWith(clean + '/'))
+    if (!inRepo) continue
+    const abs = path.join(dir, clean)
+    if (!isInside(dir, abs)) continue
+    if (fs.existsSync(abs)) continue
+    missing.push(clean)
+    if (missing.length >= 12) break
+  }
+  return missing
+}
+
 // Short-lived cache for GitHub search results; unauthenticated API is rate-limited.
 const searchCache = new Map()
 function cacheGet(key) {
@@ -911,17 +1073,24 @@ export function apply(ctx, config = {}) {
             const rawHeaders = { 'User-Agent': 'dsh-skill-forge' }
             if (token) { apiHeaders.Authorization = 'Bearer ' + token; rawHeaders.Authorization = 'Bearer ' + token }
 
-            // 1. List the repo tree to discover SKILL.md files.
+            // 1. List the repo tree: SKILL.md files plus every blob, so each
+            // skill can be installed together with its resource folders.
             const treeUrl = 'https://api.github.com/repos/' + fullName + '/git/trees/' + encodeURIComponent(ref) + '?recursive=1'
             let skillPaths
+            let allBlobs
             try {
               const { status, json } = await fetchGithubJson(treeUrl, apiHeaders, webSvc)
               if (status < 200 || status >= 300) {
                 return send(res, 200, { ok: false, error: '读取仓库目录失败：HTTP ' + status + '（分支 ' + ref + ' 是否存在？）' })
               }
-              skillPaths = (json.tree || [])
-                .filter(n => n.type === 'blob' && /(^|\/)SKILL\.md$/i.test(n.path))
-                .map(n => n.path)
+              const blobs = (json.tree || []).filter(n => n.type === 'blob').map(n => n.path)
+              allBlobs = blobs
+              skillPaths = blobs.filter(p => /(^|\/)SKILL\.md$/i.test(p))
+              if (json.truncated) {
+                // The tree API caps at ~100k entries; the payload would be
+                // incomplete, so say so rather than installing a partial skill.
+                return send(res, 200, { ok: false, error: '仓库文件过多，GitHub 返回的目录被截断，无法完整安装。请改用「采用」在会话里克隆安装。' })
+              }
             } catch (error) {
               return send(res, 200, { ok: false, error: '无法读取仓库目录：' + (error instanceof Error ? error.message : String(error)) })
             }
@@ -967,7 +1136,33 @@ export function apply(ctx, config = {}) {
                 const file = path.join(dir, 'SKILL.md')
                 if (!isInside(root.dir, file)) { skipped.push({ path: skillPath, reason: '路径越界' }); continue }
                 if (fs.existsSync(file)) { skipped.push({ path: skillPath, reason: '同名 skill 已存在：' + name }); continue }
+
+                // Download the WHOLE skill directory, not just SKILL.md. A skill
+                // whose body points at references/themes/scripts is broken
+                // without them, so the payload is every blob under the skill's
+                // folder (repo root minus junk for a root-level SKILL.md).
+                const payload = collectSkillPayload(allBlobs, skillPath)
+                const prefix = skillPath.includes('/') ? skillPath.slice(0, skillPath.lastIndexOf('/') + 1) : ''
+                let copied = 0
+                const failed = []
                 fs.mkdirSync(dir, { recursive: true })
+                for (const rel of payload) {
+                  const inner = prefix === '' ? rel : rel.slice(prefix.length)
+                  if (!inner || inner === 'SKILL.md') continue   // SKILL.md is rewritten below
+                  const dest = path.join(dir, inner.split('/').join(path.sep))
+                  if (!isInside(dir, dest)) continue
+                  try {
+                    const assetUrl = 'https://raw.githubusercontent.com/' + fullName + '/' + encodeURIComponent(ref) + '/' + rel.split('/').map(encodeURIComponent).join('/')
+                    const { status, buffer } = await httpsGetBuffer(assetUrl, rawHeaders)
+                    if (status < 200 || status >= 300) throw new Error('HTTP ' + status)
+                    fs.mkdirSync(path.dirname(dest), { recursive: true })
+                    fs.writeFileSync(dest, buffer)
+                    copied++
+                  } catch (e) {
+                    failed.push(inner)
+                  }
+                }
+
                 // Ensure a valid frontmatter name/description even if upstream omitted them.
                 const fm = Object.assign({}, parsed.frontmatter)
                 fm.name = name
@@ -976,7 +1171,12 @@ export function apply(ctx, config = {}) {
                   ? patchFrontmatterKey(patchFrontmatterKey(text, 'name', name), 'description', JSON.stringify(String(fm.description)))
                   : serializeFrontmatter({ name, description: fm.description }, text)
                 fs.writeFileSync(file, outText, 'utf8')
-                installed.push({ name, path: file, sourcePath: skillPath })
+                // Report resources the repo shipped but that never landed on
+                // disk, so a half-installed skill is visible instead of
+                // silently broken. Paths are relative to the skill folder.
+                const shippedRel = payload.map(p => prefix === '' ? p : p.slice(prefix.length)).filter(Boolean)
+                const missing = findMissingResources(outText, dir, shippedRel)
+                installed.push({ name, path: file, sourcePath: skillPath, files: copied + 1, failed, missing })
               } catch (e) {
                 skipped.push({ path: skillPath, reason: e instanceof Error ? e.message : String(e) })
               }
