@@ -794,6 +794,7 @@ export function apply(ctx, config = {}) {
             // the model catalog; `enabled:false` sets that key, `true` clears it.
             const next = patchFrontmatterKey(text, 'disable-model-invocation', enabled ? 'false' : 'true')
             fs.writeFileSync(hit.file, next, 'utf8')
+            mentionCache.at = 0 // visibility changed; @ catalog must re-read
             return send(res, 200, { ok: true })
           }
           case 'delete': {
@@ -807,7 +808,65 @@ export function apply(ctx, config = {}) {
             } else {
               fs.unlinkSync(hit.file)
             }
+            mentionCache.at = 0 // catalog changed; next @ open must re-read
             return send(res, 200, { ok: true })
+          }
+          case 'duplicate': {
+            // Clone a skill under a new name in the same writable root. Useful for
+            // "start from this one and tweak" without hand-copying files.
+            const { name, source, target } = payload
+            if (!NAME_RE.test(String(name || ''))) return send(res, 400, { ok: false, error: 'invalid name' })
+            const nextName = String(target || '').trim() || (name + '-copy')
+            if (!NAME_RE.test(nextName)) return send(res, 400, { ok: false, error: '新名称须为小写字母、数字与连字符' })
+            if (nextName === name) return send(res, 400, { ok: false, error: '新名称不能与原名称相同' })
+            const hit = findSkillFile(config, name, source)
+            if (!hit) return send(res, 404, { ok: false, error: 'skill not found' })
+            if (!isInside(hit.root.dir, hit.file)) throw new Error('path outside skill root')
+            const destDir = path.join(hit.root.dir, nextName)
+            if (fs.existsSync(destDir) || fs.existsSync(path.join(hit.root.dir, nextName + '.md'))) {
+              return send(res, 409, { ok: false, error: '目标名称已存在' })
+            }
+            const text = fs.readFileSync(hit.file, 'utf8')
+            const parsed = parseFrontmatter(text)
+            // Rewrite `name` so the copy registers under its own name; everything
+            // else in the frontmatter is preserved verbatim.
+            let out = parsed.hasFrontmatter
+              ? patchFrontmatterKey(text, 'name', nextName)
+              : serializeFrontmatter({ name: nextName, description: parsed.frontmatter.description || nextName }, text)
+            fs.mkdirSync(destDir, { recursive: true })
+            const destFile = path.join(destDir, 'SKILL.md')
+            fs.writeFileSync(destFile, out, 'utf8')
+            mentionCache.at = 0
+            return send(res, 200, { ok: true, name: nextName, path: destFile })
+          }
+          case 'stats': {
+            // Cheap aggregate for the panel header: counts by source, sizes, and
+            // which skills would be shadowed by a same-name skill in a nearer root.
+            const { skills, roots } = await listSkills(config, skillsSvc)
+            const bySource = {}
+            let totalBytes = 0
+            let withWhenToUse = 0
+            let missingDescription = 0
+            for (const s of skills) {
+              const label = s.sourceLabel || s.source || 'unknown'
+              bySource[label] = (bySource[label] || 0) + 1
+              if (typeof s.bodyLength === 'number') totalBytes += s.bodyLength
+              if (s.whenToUse) withWhenToUse++
+              if (!s.description) missingDescription++
+            }
+            return send(res, 200, {
+              ok: true,
+              total: skills.length,
+              visible: skills.filter(s => !s.disabled).length,
+              hidden: skills.filter(s => s.disabled).length,
+              managed: skills.filter(s => s.managed !== false).length,
+              builtin: skills.filter(s => s.managed === false).length,
+              withWhenToUse,
+              missingDescription,
+              totalBytes,
+              bySource,
+              roots,
+            })
           }
           case 'create': {
             const { name, description, source, content } = payload
@@ -831,6 +890,7 @@ export function apply(ctx, config = {}) {
               ? content.trim()
               : `# ${name}\n\n在此编写 skill 的指令正文。\n`
             fs.writeFileSync(file, serializeFrontmatter(fm, body), 'utf8')
+            mentionCache.at = 0 // catalog changed; next @ open must re-read
             return send(res, 200, { ok: true, path: file })
           }
           case 'installFromGithub': {

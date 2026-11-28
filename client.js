@@ -378,6 +378,19 @@ window.__ModuleLoader__.load({
         browseSkills: 'Browse installed skills',
         pickSkill: 'Pick a skill',
         pickSkillHint: 'Insert a skill into the message',
+        size: 'Size',
+        duplicateSkill: 'Duplicate',
+        duplicateNameHint: 'Name for the copied skill',
+        duplicated: 'Skill duplicated.',
+        exportSkill: 'Export',
+        exported: 'Exported as Markdown.',
+        exportEmpty: 'Nothing to export.',
+        sortBy: 'Sort',
+        sortName: 'Name',
+        sortSource: 'Source',
+        sortStatus: 'Status',
+        sortSize: 'Size',
+        shown: 'Shown',
       },
       zh: {
         title: '技能管理',
@@ -445,6 +458,19 @@ window.__ModuleLoader__.load({
         browseSkills: '浏览已安装的技能',
         pickSkill: '选择一个技能',
         pickSkillHint: '把技能插入到消息里',
+        size: '大小',
+        duplicateSkill: '复制一份',
+        duplicateNameHint: '新 skill 的名称',
+        duplicated: '已复制。',
+        exportSkill: '导出',
+        exported: '已导出为 Markdown。',
+        exportEmpty: '没有可导出的正文。',
+        sortBy: '排序',
+        sortName: '名称',
+        sortSource: '来源',
+        sortStatus: '状态',
+        sortSize: '大小',
+        shown: '显示',
       },
     }
     const dict = () => {
@@ -535,6 +561,9 @@ window.__ModuleLoader__.load({
 .skm-filter{flex:1;min-width:220px;max-width:420px;}
 .skm-filter .skm-icon{flex:none;color:var(--dsw-alias-label-secondary);}
 .skm-stats{display:flex;gap:14px;font-size:12px;color:var(--dsw-alias-label-secondary);margin-left:auto;}
+.skm-sort{flex:none;gap:7px;}
+.skm-sort-label{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:nowrap;}
+.skm-select{width:auto;min-width:96px;padding:6px 9px;cursor:pointer;}
 .skm-gh-actions{display:flex;gap:8px;align-items:center;flex:none;}
 .skm-copy{flex:none;}
 .skm-nav-icon{display:block;}
@@ -698,6 +727,7 @@ window.__ModuleLoader__.load({
       const [ghLoading, setGhLoading] = React.useState(false)
       const [enhancing, setEnhancing] = React.useState(false)
       const [filter, setFilter] = React.useState('')       // local skill filter text
+      const [sortBy, setSortBy] = React.useState('name')   // name | source | status | size
       const [installingRepo, setInstallingRepo] = React.useState(null) // fullName being installed
 
       const load = React.useCallback(async () => {
@@ -730,12 +760,71 @@ window.__ModuleLoader__.load({
 
       // Derived: filtered skill list + counters (total / visible / hidden).
       const filterText = filter.trim().toLowerCase()
-      const visibleSkills = filterText
+      const filteredSkills = filterText
         ? skills.filter(s => [s.name, s.description, s.sourceLabel || s.source].some(v => String(v || '').toLowerCase().includes(filterText)))
         : skills
+      // Sorting is applied after filtering so the counters always describe the
+      // whole catalog while the table order follows the user's pick.
+      const visibleSkills = React.useMemo(() => {
+        const arr = filteredSkills.slice()
+        if (sortBy === 'source') {
+          arr.sort((a, b) => String(a.sourceLabel || a.source).localeCompare(String(b.sourceLabel || b.source))
+            || a.name.localeCompare(b.name))
+        } else if (sortBy === 'status') {
+          arr.sort((a, b) => Number(!!a.disabled) - Number(!!b.disabled) || a.name.localeCompare(b.name))
+        } else if (sortBy === 'size') {
+          arr.sort((a, b) => (Number(b.bodyLength) || 0) - (Number(a.bodyLength) || 0))
+        } else {
+          arr.sort((a, b) => a.name.localeCompare(b.name))
+        }
+        return arr
+      }, [filteredSkills, sortBy])
       const totalCount = skills.length
       const hiddenCount = skills.filter(s => s.disabled).length
       const shownCount = visibleSkills.length
+
+      // Human-readable byte size for the detail pane.
+      const formatBytes = (n) => {
+        if (typeof n !== 'number' || !isFinite(n) || n <= 0) return '—'
+        if (n < 1024) return n + ' B'
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+        return (n / (1024 * 1024)).toFixed(1) + ' MB'
+      }
+
+      // Clone a skill under a new name (prompt for the name, then reload).
+      const duplicateSkill = async (skill) => {
+        const suggested = skill.name + '-copy'
+        let next = null
+        try {
+          next = typeof window !== 'undefined' && window.prompt ? window.prompt(t.duplicateNameHint || '新 skill 名称', suggested) : suggested
+        } catch (e) { next = suggested }
+        if (next === null || next === undefined) return
+        const trimmed = String(next).trim()
+        if (!trimmed) return
+        await run('duplicate', { name: skill.name, source: skill.source, target: trimmed }, t.duplicated || '已复制')
+      }
+
+      // Export a skill's SKILL.md as a local download (no server round trip).
+      const exportSkill = (skill, detail) => {
+        try {
+          const text = (detail && typeof detail.content === 'string' && detail.content)
+            ? detail.content
+            : ''
+          if (!text) { notify(t.exportEmpty || '没有可导出的正文'); return }
+          const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = skill.name + '.md'
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          setTimeout(() => { try { URL.revokeObjectURL(url) } catch (e) { /* ignore */ } }, 1000)
+          notify(t.exported || '已导出')
+        } catch (e) {
+          setError(String(e && e.message || e))
+        }
+      }
 
       const copyPath = async (p) => {
         try {
@@ -901,10 +990,23 @@ window.__ModuleLoader__.load({
               onChange: e => setFilter(e.target.value),
             }),
           ),
+          h('div', { className: 'skm-search-row skm-sort' },
+            h('label', { className: 'skm-sort-label' }, t.sortBy),
+            h('select', {
+              className: 'skm-input skm-select', value: sortBy,
+              onChange: e => setSortBy(e.target.value),
+            },
+              h('option', { value: 'name' }, t.sortName),
+              h('option', { value: 'source' }, t.sortSource),
+              h('option', { value: 'status' }, t.sortStatus),
+              h('option', { value: 'size' }, t.sortSize),
+            ),
+          ),
           h('div', { className: 'skm-stats' },
             h('span', null, t.total + ': ' + totalCount),
             h('span', null, t.visibleCount + ': ' + (totalCount - hiddenCount)),
             h('span', null, t.hiddenCount + ': ' + hiddenCount),
+            shownCount !== totalCount && h('span', null, t.shown + ': ' + shownCount),
           ),
         ),
         enhancing && h('div', { className: 'skm-msg' }, t.enhancing),
@@ -1010,6 +1112,8 @@ window.__ModuleLoader__.load({
                         h('div', { className: 'skm-detail-v' }, d.frontmatter?.name || s.name),
                         h('div', { className: 'skm-detail-k' }, t.description),
                         h('div', { className: 'skm-detail-v' }, d.frontmatter?.description || '—'),
+                        typeof s.bodyLength === 'number' && s.bodyLength > 0 && h('div', { className: 'skm-detail-k' }, t.size),
+                        typeof s.bodyLength === 'number' && s.bodyLength > 0 && h('div', { className: 'skm-detail-v' }, formatBytes(s.bodyLength)),
                         h('div', { className: 'skm-detail-k' }, t.openFolder),
                         h('div', { className: 'skm-detail-v skm-row' },
                           h('span', { className: 'skm-path', style: { flex: 1 } }, d.path),
@@ -1017,6 +1121,16 @@ window.__ModuleLoader__.load({
                             className: 'skm-icon-btn skm-copy', title: t.copyPath, 'aria-label': t.copyPath,
                             onClick: () => copyPath(d.path),
                           }, h(Icon, { name: 'copy' })),
+                        ),
+                        s.managed !== false && h('div', { className: 'skm-row', style: { marginTop: 12 } },
+                          h('button', {
+                            className: 'skm-btn',
+                            onClick: () => duplicateSkill(s),
+                          }, h(Icon, { name: 'copy' }), t.duplicateSkill),
+                          h('button', {
+                            className: 'skm-btn',
+                            onClick: () => exportSkill(s, d),
+                          }, h(Icon, { name: 'download' }), t.exportSkill),
                         ),
                       ),
                       h('div', { className: 'skm-detail-content' },

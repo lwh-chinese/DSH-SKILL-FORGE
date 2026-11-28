@@ -4,8 +4,8 @@
 
 功能：
 
-- 列出所有已安装的 skill，来源覆盖磁盘根目录（项目 `.dsh/skills`、`.agents/skills`，用户 DSH/agents `skills`，自定义目录，含目录联接/符号链接）以及 DSH 内置的 bundled/运行时 skill，显示名称、描述、来源与启用状态。顶部可按名称/描述/来源筛选，并显示总数、可见、隐藏计数。
-- 查看某个 skill 的 `SKILL.md` 正文与 frontmatter，并可一键复制其绝对路径。
+- 列出所有已安装的 skill，来源覆盖磁盘根目录（项目 `.dsh/skills`、`.agents/skills`，用户 DSH/agents `skills`，自定义目录，含目录联接/符号链接）以及 DSH 内置的 bundled/运行时 skill，显示名称、描述、来源与启用状态。顶部可按名称/描述/来源筛选，可按名称/来源/状态/大小排序，并显示总数、可见、隐藏计数。
+- 查看某个 skill 的 `SKILL.md` 正文与 frontmatter、正文大小，并可一键复制其绝对路径、以新名称复制一份、或把正文导出为本地 `.md` 文件。
 - 通过切换 frontmatter 中 DSH 原生的 `disable-model-invocation` 字段控制 skill 对模型的可见性（不影响原始指令正文，且不会破坏其它复杂 YAML 字段）。
 - 在用户技能根目录新建 skill（目录式 `<name>/SKILL.md`），或删除已有 skill。
 - 安装时声明 **「制作 skill」预设模式**（`preset-make-skill`）：新建会话可选，以「skill 创作者」人设启动，挂载文件读写、文件搜索、skill 文件系统与 skill 加载工具，专门用于创建、编辑和维护 skill。
